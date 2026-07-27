@@ -33,6 +33,7 @@
     "test": "node --test \"test/**/*.test.ts\"",
     "test:live": "node scripts/dev-export.ts",
     "typecheck": "tsc --noEmit",
+    "prototype:dashboard": "node scripts/prototype-dashboard.ts",
     "prepublishOnly": "pnpm run typecheck && pnpm run test && pnpm run build"
   },
   "devDependencies": {
