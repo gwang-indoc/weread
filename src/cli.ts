@@ -1,0 +1,174 @@
+#!/usr/bin/env node
+/**
+ * weread-export — 把微信读书的书导出成 PDF
+ *
+ * Bare invocation shows a checkbox picker over your 书架; passing titles skips
+ * the prompt so the same code path stays scriptable.
+ */
+import { createRequire } from 'node:module'
+import { Command } from 'commander'
+import { checkbox, Separator } from '@inquirer/prompts'
+import { login, openAuthenticated, SessionExpiredError, SESSION_PATH, hasSession } from './session.ts'
+import { listBooks, resolveBook } from './bookshelf.ts'
+import { exportBook } from './export.ts'
+import { readMeta, cacheSize, bookDir } from './cache.ts'
+import { renderPdf } from './render.ts'
+import type { Book } from './types.ts'
+
+// Resolves to the package root from both src/ and the built dist/, so the
+// reported version can never drift from package.json.
+const { version } = createRequire(import.meta.url)('../package.json') as { version: string }
+
+const program = new Command()
+
+program
+  .name('weread-export')
+  .description('导出微信读书中你有权阅读的书籍为 PDF（仅供个人使用）')
+  .version(version)
+
+program
+  .command('login')
+  .description('微信扫码登录，保存会话')
+  .action(async () => {
+    const vid = await login()
+    console.log(`\n  ✓ 已登录 (wr_vid=${vid})`)
+    console.log(`  会话保存在 ${SESSION_PATH}`)
+  })
+
+program
+  .command('list')
+  .description('列出书架上的书')
+  .action(async () => {
+    await withContext(async (ctx) => {
+      const books = await listBooks(ctx)
+      console.log(`\n  书架（${books.length} 本）\n`)
+      for (const b of books) {
+        const meta = await readMeta(b.id)
+        const cached = meta ? `  · 已缓存 ${await cacheSize(b.id)} 页` : ''
+        console.log(`  ${b.title}${cached}`)
+      }
+    })
+  })
+
+program
+  .command('render <query>')
+  .description('只用缓存重新排版 PDF，不联网抓取')
+  .option('-o, --out <dir>', '输出目录', 'out')
+  .action(async (query: string, opts: { out: string }) => {
+    await withContext(async (ctx) => {
+      const books = await listBooks(ctx)
+      const book = resolveBook(books, query)
+      const meta = await readMeta(book.id)
+      if (!meta) throw new Error(`《${book.title}》还没有缓存，先运行一次导出`)
+      const safe = book.title.replace(/[/\\:*?"<>|]/g, '_').slice(0, 80)
+      const out = `${opts.out}/${safe}.pdf`
+      await renderPdf(ctx, meta, out)
+      console.log(`\n  ✓ ${out}`)
+    })
+  })
+
+program
+  .argument('[books...]', '书名（可传多个）；不传则进入交互选择')
+  .option('-o, --out <dir>', '输出目录', 'out')
+  .option('-f, --force', '忽略缓存，重新抓取', false)
+  .option('--headed', '显示浏览器窗口', false)
+  .option('--scale <n>', '抓取分辨率倍数（越大越清晰、文件越大）', '3')
+  .option('--chapters <list>', '只导出这些目录序号，如 12,13,14')
+  .action(async (queries: string[], opts: Options) => {
+    await withContext(
+      async (ctx) => {
+        const books = await listBooks(ctx)
+        const chosen = queries.length ? queries.map((q) => resolveBook(books, q)) : await pick(books)
+        if (!chosen.length) {
+          console.log('  没有选择任何书')
+          return
+        }
+
+        const chapters = opts.chapters?.split(',').map((s) => Number(s.trim())).filter((n) => Number.isInteger(n))
+        let failed = false
+
+        for (const book of chosen) {
+          console.log(`\n  ── ${book.title} ──`)
+          const result = await exportBook(ctx, book, {
+            outDir: opts.out,
+            force: opts.force,
+            ...(chapters?.length ? { onlyChapters: chapters } : {}),
+            onProgress: (m) => console.log(`   ${m}`),
+          })
+          console.log(`\n  ✓ ${result.pdfPath}`)
+          console.log(`    抓取 ${result.chaptersCaptured} 章，跳过 ${result.chaptersSkipped} 章（已缓存）`)
+          if (result.problems.length) {
+            failed = true
+            console.log(`    ⚠ ${result.problems.length} 章有问题：`)
+            for (const p of result.problems) {
+              console.log(`      · ${p.chapter.title} — ${describeStatus(p.status)}${p.note ? `（${p.note}）` : ''}`)
+            }
+            console.log(`    这些章节在 PDF 中有占位页；缓存在 ${bookDir(book.id)}`)
+          }
+        }
+        // Nothing silently incomplete: a gap in the book is a non-zero exit.
+        if (failed) process.exitCode = 1
+      },
+      { headed: opts.headed, deviceScaleFactor: Number(opts.scale) || 3 },
+    )
+  })
+
+interface Options {
+  out: string
+  force: boolean
+  headed: boolean
+  scale: string
+  chapters?: string
+}
+
+function describeStatus(status: string): string {
+  if (status === 'unauthorized') return '未授权（试读已结束）'
+  if (status === 'empty') return '本章无正文'
+  return '抓取失败'
+}
+
+async function pick(books: Book[]): Promise<Book[]> {
+  if (!books.length) return []
+  const selected = await checkbox({
+    message: `书架（${books.length} 本）— 空格选择，回车开始`,
+    pageSize: 15,
+    choices: [
+      new Separator(' '),
+      ...(await Promise.all(
+        books.map(async (b) => {
+          const cached = await cacheSize(b.id)
+          return { name: cached ? `${b.title}  · 已缓存 ${cached} 页` : b.title, value: b }
+        }),
+      )),
+    ],
+  })
+  return selected
+}
+
+async function withContext(
+  fn: (ctx: import('playwright-core').BrowserContext) => Promise<void>,
+  opts: { headed?: boolean; deviceScaleFactor?: number } = {},
+): Promise<void> {
+  if (!hasSession()) {
+    console.error('  还没有登录，先运行：weread-export login')
+    process.exitCode = 1
+    return
+  }
+  const { browser, ctx } = await openAuthenticated(opts)
+  try {
+    await fn(ctx)
+  } finally {
+    await browser.close()
+  }
+}
+
+program.parseAsync(process.argv).catch((e) => {
+  if (e instanceof SessionExpiredError) {
+    console.error(`\n  ✗ 会话已过期，请重新运行：weread-export login`)
+  } else if (e && typeof e === 'object' && 'name' in e && e.name === 'ExitPromptError') {
+    console.error('\n  已取消')
+  } else {
+    console.error(`\n  ✗ ${(e as Error).message}`)
+  }
+  process.exitCode = 1
+})

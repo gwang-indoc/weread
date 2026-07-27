@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "dist",
+    "declaration": false,
+    "sourceMap": true,
+    // Lets the source keep importing './session.ts' (which is what Node's own
+    // type stripping wants) while the emitted JS imports './session.js'.
+    "rewriteRelativeImportExtensions": true
+  },
+  "include": ["src"]
+}

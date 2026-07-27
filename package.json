@@ -1,0 +1,55 @@
+{
+  "name": "weread-export",
+  "version": "0.1.0",
+  "description": "把微信读书里你有权阅读的书导出成 PDF（仅供个人使用）/ Export books you can read on WeRead to PDF",
+  "keywords": [
+    "weread",
+    "微信读书",
+    "pdf",
+    "export",
+    "ebook",
+    "cli",
+    "playwright"
+  ],
+  "license": "MIT",
+  "author": "gwang",
+  "type": "module",
+  "bin": {
+    "weread-export": "dist/cli.js"
+  },
+  "engines": {
+    "node": ">=20.11"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CONTEXT.md",
+    "docs/adr"
+  ],
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "prepare": "tsc -p tsconfig.build.json",
+    "start": "node src/cli.ts",
+    "test": "node --test \"test/**/*.test.ts\"",
+    "test:live": "node scripts/dev-export.ts",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "pnpm run typecheck && pnpm run test && pnpm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  },
+  "dependencies": {
+    "@inquirer/prompts": "^8.5.2",
+    "commander": "^15.0.0",
+    "playwright-core": "^1.62.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gwang-indoc/weread.git"
+  },
+  "bugs": {
+    "url": "https://github.com/gwang-indoc/weread/issues"
+  },
+  "homepage": "https://github.com/gwang-indoc/weread#readme"
+}

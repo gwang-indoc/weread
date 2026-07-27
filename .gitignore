@@ -1,0 +1,8 @@
+node_modules/
+dist/
+spike-out/
+out/
+*.pdf
+.DS_Store
+*.tgz
+.claude/
