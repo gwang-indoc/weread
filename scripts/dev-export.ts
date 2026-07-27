@@ -1,17 +1,16 @@
 /**
- * End-to-end check: capture a few screens of one chapter and typeset a PDF.
+ * End-to-end check: page through the start of a book and typeset a PDF.
  *
- * Usage: node scripts/dev-export.ts "我的第一本算法书" 12 4
- *        (book query, TOC index, max screens)
+ * Usage: node scripts/dev-export.ts "牛顿传" 8
+ *        (book query, max screens)
  */
 import { openAuthenticated } from '../src/session.ts'
 import { listBooks, resolveBook } from '../src/bookshelf.ts'
 import { exportBook } from '../src/export.ts'
-import { cacheSize, bookDir } from '../src/cache.ts'
+import { cacheSize, bookDir, readMeta } from '../src/cache.ts'
 
 const query = process.argv[2] ?? ''
-const chapterIndex = Number(process.argv[3] ?? '12')
-const maxScreens = Number(process.argv[4] ?? '4')
+const maxScreens = Number(process.argv[3] ?? '8')
 
 async function main() {
   const { browser, ctx } = await openAuthenticated({ headed: true, deviceScaleFactor: 3 })
@@ -23,16 +22,18 @@ async function main() {
 
     const result = await exportBook(ctx, book, {
       outDir: 'out',
-      onlyChapters: [chapterIndex],
       force: true,
-      maxScreensPerChapter: maxScreens,
+      maxScreens,
       onProgress: (m) => console.log(`   ${m}`),
     })
 
-    console.log(`\n  captured ${result.chaptersCaptured}, skipped ${result.chaptersSkipped}`)
+    console.log(`\n  屏数 ${result.screensCaptured}，结果 ${result.outcome}${result.note ? ` (${result.note})` : ''}`)
     console.log(`  cached PNGs: ${await cacheSize(book.id)}`)
-    for (const p of result.problems) console.log(`  ⚠ ${p.chapter.title}: ${p.status} ${p.note ?? ''}`)
     console.log(`  pdf: ${result.pdfPath}`)
+
+    // Header labels are what the PDF outline is built from; show them.
+    const meta = await readMeta(book.id)
+    for (const s of meta?.screens ?? []) console.log(`   s${s.seq} header="${s.header ?? ''}" files=${s.files.length}`)
   } finally {
     await browser.close()
   }

@@ -64,6 +64,9 @@ export async function openToc(page: Page): Promise<void> {
   if (await isTocOpen(page)) return
   await page.click(TOC_BUTTON, { timeout: 15_000 })
   await page.waitForSelector(TOC_ITEM, { timeout: 15_000 })
+  // Let the panel finish auto-scrolling to the current chapter before anyone
+  // clicks a row.
+  await waitUntilStill(page.locator(TOC_ITEM).first())
 }
 
 /**
@@ -104,12 +107,45 @@ export async function readToc(page: Page): Promise<Chapter[]> {
   )
 }
 
-/** Navigate to a Chapter by clicking its title, then clear the TOC backdrop. */
-export async function gotoChapter(page: Page, index: number): Promise<void> {
+/**
+ * Wait until a locator has stopped moving.
+ *
+ * The 目录 panel auto-scrolls to the current chapter when it opens. Clicking
+ * during that animation lands on whichever row slid under the pointer — which
+ * is how navigating to 牛顿的家族 ended up on 第一章 离弃, silently capturing the
+ * wrong unit.
+ */
+async function waitUntilStill(locator: ReturnType<Page['locator']>, timeoutMs = 6000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  let previous: string | null = null
+  while (Date.now() < deadline) {
+    const box = await locator.boundingBox().catch(() => null)
+    const current = box ? `${Math.round(box.x)},${Math.round(box.y)}` : null
+    if (current && current === previous) return
+    previous = current
+    await locator.page().waitForTimeout(250)
+  }
+}
+
+/**
+ * Navigate to a Chapter by clicking its title, then clear the TOC backdrop.
+ *
+ * Returns the title text actually clicked, so the caller can tell whether the
+ * reader honoured it — a click that lands on the wrong row must not pass for
+ * success.
+ */
+export async function gotoChapter(page: Page, index: number): Promise<string> {
   await openToc(page)
   const item = page.locator(TOC_ITEM).nth(index)
-  const title = item.locator(TOC_ITEM_TITLE)
-  await (await title.count() > 0 ? title : item).click({ timeout: 10_000 })
+  const titleEl = item.locator(TOC_ITEM_TITLE)
+  const target = (await titleEl.count()) > 0 ? titleEl : item
+
+  await target.scrollIntoViewIfNeeded({ timeout: 10_000 }).catch(() => {})
+  await waitUntilStill(target)
+  const clickedTitle = (await target.innerText().catch(() => '')).trim()
+
+  await target.click({ timeout: 10_000 })
   await page.waitForTimeout(1500)
   await closeToc(page)
+  return clickedTitle
 }

@@ -55,10 +55,12 @@ export function buildHtml(meta: BookMeta, opts: RenderOptions = {}): string {
          </section>`
 
   const body = pages
-    .map(({ chapter, file, isChapterStart }) => {
+    .map(({ file, header, isUnitStart }) => {
       const src = escapeHtml(file)
-      const title = escapeHtml(chapter.title)
-      const heading = isChapterStart ? `<h2 class="chapter-mark">${title}</h2>` : ''
+      const title = escapeHtml(header ?? '')
+      // Only a page where the running header changed emits <h2>, so the PDF
+      // outline gains one entry per chapter rather than one per page.
+      const heading = isUnitStart && title ? `<h2 class="chapter-mark">${title}</h2>` : ''
       return `<section class="page content">
                 <div class="runhead">${title}</div>
                 ${heading}
@@ -67,21 +69,25 @@ export function buildHtml(meta: BookMeta, opts: RenderOptions = {}): string {
     })
     .join('\n')
 
-  const placeholders = Object.values(meta.captured)
-    .filter((c) => c.status === 'unauthorized' || c.status === 'failed' || c.status === 'empty')
-    .map(
-      (c) => `<section class="page missing">
-                <div class="runhead">${escapeHtml(c.title)}</div>
-                <div class="missing-box">
-                  <p class="missing-title">⚠ ${escapeHtml(c.title)}</p>
-                  <p class="missing-why">内容未导出：${escapeHtml(
-                    c.status === 'unauthorized' ? '未授权（试读已结束）' : c.status === 'empty' ? '本章无正文' : '提取失败',
-                  )}</p>
-                  ${c.note ? `<p class="missing-note">${escapeHtml(c.note)}</p>` : ''}
-                </div>
-              </section>`,
-    )
-    .join('\n')
+  // One trailing page when the walk did not reach the end of the book, so an
+  // incomplete export can never pass for a complete one.
+  const incomplete =
+    meta.outcome && meta.outcome !== 'complete'
+      ? `<section class="page missing">
+           <div class="missing-box">
+             <p class="missing-title">⚠ 导出未完成</p>
+             <p class="missing-why">${escapeHtml(
+               meta.outcome === 'unauthorized'
+                 ? '未授权：试读已结束或未购买，后续内容无法导出'
+                 : meta.outcome === 'interrupted'
+                   ? '抓取中断，本书未翻到最后一页'
+                   : '抓取失败',
+             )}</p>
+             ${meta.note ? `<p class="missing-note">${escapeHtml(meta.note)}</p>` : ''}
+             <p class="missing-note">已导出 ${pages.length} 页。重新运行同一命令会从缓存继续。</p>
+           </div>
+         </section>`
+      : ''
 
   return `<meta charset="utf-8">
 <title>${escapeHtml(meta.title)}</title>
@@ -135,7 +141,7 @@ export function buildHtml(meta: BookMeta, opts: RenderOptions = {}): string {
 ${cover}
 ${toc}
 ${body}
-${placeholders}
+${incomplete}
 `
 }
 

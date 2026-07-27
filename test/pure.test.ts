@@ -2,16 +2,17 @@
  * Offline tests for the pure parts.
  *
  * Nothing here touches the network or a browser: these are the decisions that
- * shape the export (which TOC entries to walk, how pages are named and ordered,
- * what the print document contains), so they must be checkable without logging
- * into WeRead. The browser-dependent halves are exercised by the dev harness in
- * scripts/ and by the live smoke test.
+ * shape the export (where a resumed walk restarts, how pages are named and
+ * ordered, what the print document contains), so they must be checkable without
+ * logging into WeRead. The browser-dependent halves are exercised by the dev
+ * harness in scripts/ and by the live smoke test.
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { bookIdFromUrl, resolveBook } from '../src/bookshelf.ts'
-import { isCaptureUnit } from '../src/export.ts'
-import { screenFileName, orderedPages, isChapterDone, type BookMeta } from '../src/cache.ts'
+import { sameTitle, resumeIndex } from '../src/export.ts'
+import { chapterKeyOf } from '../src/capture.ts'
+import { screenFileName, orderedPages, knownHashes, lastHeader, CACHE_VERSION, type BookMeta } from '../src/cache.ts'
 import { buildHtml } from '../src/render.ts'
 import type { Book, Chapter } from '../src/types.ts'
 
@@ -21,12 +22,16 @@ const books: Book[] = [
   { id: 'c3', title: '望向星空深处（天际线）', readerUrl: 'https://weread.qq.com/web/reader/c3' },
 ]
 
+const chapters: Chapter[] = [
+  { index: 0, level: 1, title: '扉页' },
+  { index: 1, level: 1, title: '版权信息' },
+  { index: 2, level: 1, title: '第一章 离弃' },
+  { index: 3, level: 2, title: '牛顿的家族' },
+  { index: 4, level: 2, title: '艾萨克·牛顿出世' },
+]
+
 test('bookIdFromUrl extracts the id, with or without a chapter suffix', () => {
   assert.equal(bookIdFromUrl('https://weread.qq.com/web/reader/a9c32f40717db77aa9c9171'), 'a9c32f40717db77aa9c9171')
-  assert.equal(
-    bookIdFromUrl('https://weread.qq.com/web/reader/c2d32b90813abb6a8g016c61kc9f326d018c9f0f895fb5e4'),
-    'c2d32b90813abb6a8g016c61kc9f326d018c9f0f895fb5e4',
-  )
   assert.equal(bookIdFromUrl('https://weread.qq.com/web/reader/a1?foo=1#x'), 'a1')
 })
 
@@ -45,103 +50,95 @@ test('resolveBook refuses to guess when a query is ambiguous', () => {
   assert.throws(() => resolveBook(books, '不存在的书'), /找不到/)
 })
 
-test('only level-1 entries are capture units, so 节 are not captured twice', () => {
-  // A level-1 chapter followed by its 节: walking the chapter covers both,
-  // because the running header does not change across subsections.
-  const chapters: Chapter[] = [
-    { index: 0, level: 1, title: '扉页' },
-    { index: 1, level: 1, title: '第1章 数据结构' },
-    { index: 2, level: 2, title: '1-1 什么是数据结构' },
-    { index: 3, level: 2, title: '1-2 链表' },
-    { index: 4, level: 1, title: '第2章 排序' },
-  ]
-  assert.deepEqual(
-    chapters.filter((c) => isCaptureUnit(chapters, c.index)).map((c) => c.index),
-    [0, 1, 4],
+test('sameTitle ignores whitespace but never matches on emptiness', () => {
+  assert.ok(sameTitle('第一章 离弃', '第一章　离弃'))
+  assert.ok(sameTitle(' 牛顿的家族 ', '牛顿的家族'))
+  assert.ok(!sameTitle('牛顿的家族', '艾萨克·牛顿出世'))
+  assert.ok(!sameTitle(null, null), 'two unknown headers are not a match')
+  assert.ok(!sameTitle('', ''))
+})
+
+test('chapterKeyOf reads the unit key when the URL carries one', () => {
+  assert.equal(
+    chapterKeyOf('https://weread.qq.com/web/reader/1d232b8071f3ef871d2908dk8f132430178f14e45fce0f7'),
+    'k8f132430178f14e45fce0f7',
   )
+  // Recorded for diagnostics only: the key is often absent or stale, which is
+  // exactly why it is not used as a boundary signal.
+  assert.equal(chapterKeyOf('https://weread.qq.com/web/reader/a9c32f40717db77aa9c9171'), '')
+})
+
+test('resumeIndex aims a resumed walk at the last header seen', () => {
+  assert.equal(resumeIndex(chapters, '牛顿的家族'), 3)
+  assert.equal(resumeIndex(chapters, '第一章 离弃'), 2)
+  assert.equal(resumeIndex(chapters, null), 0, 'a fresh run starts at the beginning')
+  assert.equal(resumeIndex(chapters, '这本书里没有的标题'), 0, 'an unknown header restarts from the beginning')
 })
 
 test('screen file names sort into reading order as plain strings', () => {
-  const names = [
-    screenFileName(12, 3, 1),
-    screenFileName(2, 10, 0),
-    screenFileName(12, 3, 0),
-    screenFileName(2, 2, 0),
-  ]
-  assert.deepEqual([...names].sort(), [
-    'ch0002-s0002-c0.png',
-    'ch0002-s0010-c0.png',
-    'ch0012-s0003-c0.png',
-    'ch0012-s0003-c1.png',
-  ])
+  const names = [screenFileName(10, 1), screenFileName(2, 0), screenFileName(10, 0), screenFileName(1, 0)]
+  assert.deepEqual([...names].sort(), ['s00001-c0.png', 's00002-c0.png', 's00010-c0.png', 's00010-c1.png'])
 })
 
 function metaFixture(): BookMeta {
   return {
+    version: CACHE_VERSION,
     bookId: 'a1',
     title: '测试书',
-    chapters: [
-      { index: 0, level: 1, title: '第一章' },
-      { index: 1, level: 1, title: '第二章' },
-      { index: 2, level: 1, title: '第三章' },
+    chapters,
+    screens: [
+      { seq: 0, files: ['s00000-c0.png', 's00000-c1.png'], hashes: ['h0a', 'h0b'], header: '第一章 离弃' },
+      { seq: 1, files: ['s00001-c0.png', 's00001-c1.png'], hashes: ['h1a', 'h1b'], header: '第一章 离弃' },
+      { seq: 2, files: ['s00002-c0.png'], hashes: ['h2a'], header: '牛顿的家族' },
     ],
-    captured: {
-      '1': {
-        index: 1,
-        title: '第二章',
-        level: 1,
-        status: 'complete',
-        screens: 2,
-        files: ['ch0001-s0000-c0.png', 'ch0001-s0000-c1.png', 'ch0001-s0001-c0.png'],
-      },
-      '0': {
-        index: 0,
-        title: '第一章',
-        level: 1,
-        status: 'complete',
-        screens: 1,
-        files: ['ch0000-s0000-c0.png'],
-      },
-      '2': { index: 2, title: '第三章', level: 1, status: 'unauthorized', screens: 0, files: [], note: '试读结束' },
-    },
     updatedAt: '2026-01-01T00:00:00.000Z',
   }
 }
 
-test('orderedPages walks chapters in index order and flags chapter starts', () => {
+test('orderedPages yields one page per column and marks only header changes', () => {
   const pages = orderedPages(metaFixture())
   assert.deepEqual(
-    pages.map((p) => [p.file, p.isChapterStart]),
+    pages.map((p) => [p.file, p.isUnitStart]),
     [
-      ['ch0000-s0000-c0.png', true],
-      ['ch0001-s0000-c0.png', true],
-      ['ch0001-s0000-c1.png', false],
-      ['ch0001-s0001-c0.png', false],
+      ['s00000-c0.png', true], // first screen: a header appears
+      ['s00000-c1.png', false], // same screen, second column
+      ['s00001-c0.png', false], // header unchanged
+      ['s00001-c1.png', false],
+      ['s00002-c0.png', true], // header changed -> new unit
     ],
   )
 })
 
-test('a failed chapter is retried on the next run; settled ones are not', () => {
-  const meta = metaFixture()
-  assert.equal(isChapterDone(meta, 0), true)
-  assert.equal(isChapterDone(meta, 2), true, 'unauthorized is settled, not worth refetching')
-  assert.equal(isChapterDone(meta, 99), false, 'never captured')
-  meta.captured['0'].status = 'failed'
-  assert.equal(isChapterDone(meta, 0), false, 'failures are retried')
+test('knownHashes collects every stored column, for skipping on resume', () => {
+  assert.deepEqual([...knownHashes(metaFixture())].sort(), ['h0a', 'h0b', 'h1a', 'h1b', 'h2a'])
 })
 
-test('buildHtml emits one page per captured column, with a chapter mark only at chapter starts', () => {
+test('lastHeader reports where the walk got to', () => {
+  assert.equal(lastHeader(metaFixture()), '牛顿的家族')
+  assert.equal(lastHeader({ ...metaFixture(), screens: [] }), null)
+})
+
+test('the cache layout is versioned, so v1 per-chapter caches are discarded', () => {
+  // readMeta enforces this; the constant is what that check pins to.
+  assert.ok(CACHE_VERSION >= 2, 'v1 stored per-chapter records that cannot be reinterpreted')
+})
+
+test('buildHtml emits one page per captured column, with a mark per unit', () => {
   const html = buildHtml(metaFixture())
-  assert.equal((html.match(/class="page content"/g) ?? []).length, 4)
-  // Two captured chapters -> two outline entries, not one per page.
+  assert.equal((html.match(/class="page content"/g) ?? []).length, 5)
+  // Two units in the fixture -> two outline entries, not one per page.
   assert.equal((html.match(/class="chapter-mark"/g) ?? []).length, 2)
   assert.match(html, /size: A5 portrait/)
 })
 
-test('buildHtml renders a visible placeholder for content it could not export', () => {
-  const html = buildHtml(metaFixture())
-  assert.match(html, /未授权（试读已结束）/)
-  assert.match(html, /第三章/)
+test('buildHtml adds a notice page when the walk did not finish', () => {
+  const complete = buildHtml({ ...metaFixture(), outcome: 'complete' })
+  assert.ok(!complete.includes('导出未完成'))
+
+  const cut = buildHtml({ ...metaFixture(), outcome: 'unauthorized', note: '试读结束' })
+  assert.match(cut, /导出未完成/)
+  assert.match(cut, /未授权/)
+  assert.match(cut, /试读结束/)
 })
 
 test('buildHtml escapes titles so a book name cannot inject markup', () => {

@@ -172,6 +172,39 @@ export async function restoreDarkTheme(page: Page): Promise<void> {
   await page.waitForTimeout(1500)
 }
 
+/**
+ * The unit-identifying suffix WeRead appends to a reader URL.
+ *
+ * WeRead addresses every TOC entry — 章 *and* 节 — as its own unit with its own
+ * key, and the key changes exactly when the reader crosses into the next one.
+ * That makes it the boundary signal. The running header is only a label: it
+ * shows the current 节, so treating a header change as a chapter change stops a
+ * walk two screens in.
+ */
+export function chapterKeyOf(url: string): string {
+  return /\/web\/reader\/[^/?#]*?(k[0-9a-f]{8,})/.exec(url)?.[1] ?? ''
+}
+
+/**
+ * Wait until the reader has settled on a unit: a stable, non-empty URL key with
+ * rendered columns.
+ *
+ * Without this the first screen after navigation can still belong to the
+ * previous unit, which made a walk compare against a stale start key and stop
+ * immediately.
+ */
+export async function waitForSettled(page: Page, timeoutMs = 30_000): Promise<string> {
+  const deadline = Date.now() + timeoutMs
+  let previous = ''
+  while (Date.now() < deadline) {
+    const key = chapterKeyOf(page.url())
+    if (key && key === previous && (await findColumns(page)).length > 0) return key
+    previous = key
+    await page.waitForTimeout(800)
+  }
+  return chapterKeyOf(page.url())
+}
+
 /** Wait until both prose columns exist and have non-trivial size. */
 export async function waitForColumns(page: Page, timeoutMs = 45_000): Promise<CanvasBox[]> {
   const deadline = Date.now() + timeoutMs
@@ -230,25 +263,121 @@ export interface WalkOptions {
   onScreen?: (screen: ScreenCapture, index: number) => Promise<void> | void
 }
 
-export interface WalkResult {
-  screenCount: number
+export interface BookWalkOptions extends WalkOptions {
+  /** Column hashes already cached, so a resumed walk re-pages without re-storing. */
+  known?: Set<string>
+  onProgress?: (msg: string) => void
+}
+
+export interface BookWalkResult {
+  /** Screens seen, including ones skipped as already known. */
+  screensSeen: number
+  /** Screens handed to onScreen, i.e. new ones. */
+  screensNew: number
   stoppedBecause: string
-  /** Header seen when the walk began, i.e. the chapter we were capturing. */
-  header: string | null
 }
 
 /**
- * Capture a chapter by paging forward until it ends.
+ * Walk the whole book forward from the current position, capturing every screen.
  *
- * Stops when the running header changes (we have crossed into the next
- * chapter, so that screen is not ours) or when a capture repeats (pagination
- * refused to advance, i.e. end of book).
+ * There is deliberately no chapter boundary here. 节 can start partway down a
+ * page, so pages cannot be partitioned per chapter — walking unit-by-unit either
+ * lost pages or repeated them. A single linear pass cannot do either.
+ *
+ * Stops when a screen repeats, which is how the reader behaves at the end of the
+ * book: 下一页 stops advancing and the same pixels come back.
+ */
+export async function walkBook(page: Page, opts: BookWalkOptions = {}): Promise<BookWalkResult> {
+  const { maxScreens = 3000, minDelayMs = 1000, maxDelayMs = 3000, onScreen, known, onProgress } = opts
+
+  const seenThisRun = new Set<string>()
+  let seen = 0
+  let fresh = 0
+  let misses = 0
+
+  for (let i = 0; i < maxScreens + misses; i++) {
+    const screen = await captureScreen(page)
+
+    // Front matter — 扉页, 版权信息, the flyleaf — is rendered as ordinary DOM
+    // rather than painted to canvas, so it has no columns to capture. Those
+    // pages are not the book's prose and are skipped rather than treated as a
+    // failure; only a run of them means the reader really is stuck.
+    if (!screen.columns.length) {
+      misses++
+      if (misses > 6) {
+        return { screensSeen: seen, screensNew: fresh, stoppedBecause: 'no canvas columns rendered' }
+      }
+      onProgress?.(`跳过无正文页（${misses}）· ${screen.header ?? ''}`)
+      const skipNext = page.locator('text=下一页').first()
+      if ((await skipNext.count()) === 0) {
+        return { screensSeen: seen, screensNew: fresh, stoppedBecause: 'no 下一页 control' }
+      }
+      try {
+        await skipNext.click({ timeout: 8000 })
+      } catch {
+        return { screensSeen: seen, screensNew: fresh, stoppedBecause: '下一页 not clickable' }
+      }
+      await page.waitForTimeout(1500)
+      continue
+    }
+    misses = 0
+    // A screen we already captured *this run* means pagination stopped moving.
+    if (seenThisRun.has(screen.signature)) {
+      return { screensSeen: seen, screensNew: fresh, stoppedBecause: 'end of book (screen repeated)' }
+    }
+    seenThisRun.add(screen.signature)
+    seen++
+
+    const alreadyCached = known?.has(screen.columns[0]?.hash ?? '')
+    if (!alreadyCached) {
+      await onScreen?.(screen, i)
+      fresh++
+    }
+    if (seen % 25 === 0) onProgress?.(`已翻 ${seen} 屏（新增 ${fresh}）· ${screen.header ?? ''}`)
+
+    await page.waitForTimeout(minDelayMs + Math.floor(Math.random() * (maxDelayMs - minDelayMs)))
+
+    const next = page.locator('text=下一页').first()
+    if ((await next.count()) === 0) {
+      return { screensSeen: seen, screensNew: fresh, stoppedBecause: 'no 下一页 control' }
+    }
+    try {
+      await next.click({ timeout: 8000 })
+    } catch {
+      return { screensSeen: seen, screensNew: fresh, stoppedBecause: '下一页 not clickable' }
+    }
+    await page.waitForTimeout(1200)
+  }
+  return { screensSeen: seen, screensNew: fresh, stoppedBecause: `hit maxScreens=${maxScreens}` }
+}
+
+export interface WalkResult {
+  screenCount: number
+  stoppedBecause: string
+  /** Running header seen when the walk began — a label, not an identity. */
+  header: string | null
+  /** URL key of the unit that was captured. */
+  key: string
+}
+
+/**
+ * Capture one unit by paging forward until it ends.
+ *
+ * The boundary is the running header, which names the current 节 and therefore
+ * changes exactly at a unit boundary. The URL key is recorded for diagnostics
+ * but is NOT used as the boundary: it lags behind the display and is sometimes
+ * absent entirely, which made walks stop on a stale value.
+ *
+ * A repeated capture means the end of the book, where 下一页 stops advancing.
  */
 export async function walkChapter(page: Page, opts: WalkOptions = {}): Promise<WalkResult> {
   const { maxScreens = 400, minDelayMs = 1000, maxDelayMs = 3000, onScreen } = opts
 
   const first = await captureScreen(page)
-  if (!first.columns.length) return { screenCount: 0, stoppedBecause: 'no canvas columns rendered', header: first.header }
+  const startKey = chapterKeyOf(page.url())
+  if (!first.columns.length) {
+    return { screenCount: 0, stoppedBecause: 'no canvas columns rendered', header: first.header, key: startKey }
+  }
 
   const startHeader = first.header
   const seen = new Set<string>([first.signature])
@@ -260,24 +389,30 @@ export async function walkChapter(page: Page, opts: WalkOptions = {}): Promise<W
     await page.waitForTimeout(minDelayMs + Math.floor(Math.random() * (maxDelayMs - minDelayMs)))
 
     const next = page.locator('text=下一页').first()
-    if ((await next.count()) === 0) return { screenCount: count, stoppedBecause: 'no 下一页 control', header: startHeader }
+    if ((await next.count()) === 0) {
+      return { screenCount: count, stoppedBecause: 'no 下一页 control', header: startHeader, key: startKey }
+    }
     try {
       await next.click({ timeout: 8000 })
     } catch {
-      return { screenCount: count, stoppedBecause: '下一页 not clickable', header: startHeader }
+      return { screenCount: count, stoppedBecause: '下一页 not clickable', header: startHeader, key: startKey }
     }
     await page.waitForTimeout(1200)
 
     const screen = await captureScreen(page)
-    if (!screen.columns.length) return { screenCount: count, stoppedBecause: 'blank screen', header: startHeader }
-    if (seen.has(screen.signature)) return { screenCount: count, stoppedBecause: 'end of book (screen repeated)', header: startHeader }
+    if (!screen.columns.length) {
+      return { screenCount: count, stoppedBecause: 'blank screen', header: startHeader, key: startKey }
+    }
+    if (seen.has(screen.signature)) {
+      return { screenCount: count, stoppedBecause: 'end of book (screen repeated)', header: startHeader, key: startKey }
+    }
     if (startHeader && screen.header && screen.header !== startHeader) {
-      return { screenCount: count, stoppedBecause: `next chapter (${screen.header})`, header: startHeader }
+      return { screenCount: count, stoppedBecause: `next unit (${screen.header})`, header: startHeader, key: startKey }
     }
 
     seen.add(screen.signature)
     await onScreen?.(screen, i)
     count++
   }
-  return { screenCount: count, stoppedBecause: `hit maxScreens=${maxScreens}`, header: startHeader }
+  return { screenCount: count, stoppedBecause: `hit maxScreens=${maxScreens}`, header: startHeader, key: startKey }
 }

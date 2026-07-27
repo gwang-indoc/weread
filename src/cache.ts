@@ -1,12 +1,16 @@
 /**
- * Per-chapter capture cache.
+ * Capture cache for one Book.
  *
- * A book is hundreds of page-turns against a live site, so a failure at chapter
- * 130 must not cost the first 129. Captures land on disk as they happen, keyed
- * by book and chapter, and a re-run skips whatever is already complete.
+ * The unit of capture is a Screen, not a Chapter. WeRead's 节 can begin partway
+ * down a page, so no clean per-chapter partition of pages exists — the running
+ * header lags by up to a page and clicking a 节 in the 目录 lands on the page
+ * where it starts, which may still be headed by the previous 节. Attempts to
+ * walk chapter-by-chapter therefore either skipped content or captured it twice.
  *
- * Caching images rather than a finished PDF also means the PDF can be
- * re-typeset — or an OCR text layer added later — with no re-scraping.
+ * So a Book is stored as an ordered list of Screens, each identified by the
+ * content hash of its columns. Hashes make the cache idempotent: a resumed run
+ * can re-page over ground it already covered and simply not store it again.
+ * Chapter titles are recorded per screen as labels, for bookmarks and headers.
  */
 import { mkdir, readFile, writeFile, rm, readdir } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
@@ -17,26 +21,31 @@ import type { ScreenCapture } from './capture.ts'
 
 export const CACHE_ROOT = join(homedir(), '.cache', 'weread-export')
 
-/** Why a chapter has no captures, when that is expected rather than a bug. */
-export type ChapterStatus = 'complete' | 'empty' | 'unauthorized' | 'failed'
+/** Bumped when the cache layout changes; older caches are discarded. */
+export const CACHE_VERSION = 2
 
-export interface ChapterRecord {
-  index: number
-  title: string
-  level: number
-  status: ChapterStatus
-  screens: number
-  /** Cache-relative file names, in reading order. */
+/** How a walk ended, when it ended for a reason worth reporting. */
+export type WalkOutcome = 'complete' | 'unauthorized' | 'interrupted' | 'failed'
+
+export interface ScreenRecord {
+  /** Position in reading order, from the start of the book. */
+  seq: number
+  /** Cache-relative file names, left column first. */
   files: string[]
-  stoppedBecause?: string
-  note?: string
+  /** Content hashes of those columns — the screen's identity. */
+  hashes: string[]
+  /** Running header when this screen was captured. A label, not an identity. */
+  header: string | null
 }
 
 export interface BookMeta {
+  version: number
   bookId: string
   title: string
   chapters: Chapter[]
-  captured: Record<string, ChapterRecord>
+  screens: ScreenRecord[]
+  outcome?: WalkOutcome
+  note?: string
   updatedAt: string
 }
 
@@ -45,18 +54,20 @@ export function bookDir(bookId: string): string {
 }
 
 const metaPath = (bookId: string) => join(bookDir(bookId), 'meta.json')
+const pad = (n: number, w = 5) => String(n).padStart(w, '0')
 
-const pad = (n: number, w = 4) => String(n).padStart(w, '0')
-
-export function screenFileName(chapterIndex: number, screenIndex: number, column: number): string {
-  return `ch${pad(chapterIndex)}-s${pad(screenIndex)}-c${column}.png`
+export function screenFileName(seq: number, column: number): string {
+  return `s${pad(seq)}-c${column}.png`
 }
 
 export async function readMeta(bookId: string): Promise<BookMeta | null> {
   const p = metaPath(bookId)
   if (!existsSync(p)) return null
   try {
-    return JSON.parse(await readFile(p, 'utf8')) as BookMeta
+    const meta = JSON.parse(await readFile(p, 'utf8')) as BookMeta
+    // A cache written by an older layout cannot be trusted or merged.
+    if (meta.version !== CACHE_VERSION) return null
+    return meta
   } catch {
     return null // corrupt cache is the same as no cache
   }
@@ -71,54 +82,64 @@ export async function writeMeta(meta: BookMeta): Promise<void> {
 export async function initMeta(bookId: string, title: string, chapters: Chapter[]): Promise<BookMeta> {
   const existing = await readMeta(bookId)
   if (existing) {
-    // Keep captures, refresh the TOC in case the book was updated.
+    // Keep the screens, refresh the TOC in case the book was updated.
     existing.chapters = chapters
     existing.title = title
     return existing
   }
-  return { bookId, title, chapters, captured: {}, updatedAt: new Date().toISOString() }
+  return { version: CACHE_VERSION, bookId, title, chapters, screens: [], updatedAt: new Date().toISOString() }
 }
 
-/** Persist one screen's columns; returns the file names written. */
-export async function saveScreen(
-  bookId: string,
-  chapterIndex: number,
-  screenIndex: number,
-  screen: ScreenCapture,
-): Promise<string[]> {
-  const dir = bookDir(bookId)
+/** Every column hash already stored, so a resumed walk can skip known ground. */
+export function knownHashes(meta: BookMeta): Set<string> {
+  const out = new Set<string>()
+  for (const s of meta.screens) for (const h of s.hashes) out.add(h)
+  return out
+}
+
+/** The header of the last captured screen — where a resumed walk should aim. */
+export function lastHeader(meta: BookMeta): string | null {
+  return meta.screens.length ? meta.screens[meta.screens.length - 1].header : null
+}
+
+/**
+ * Store one screen and return its record. Idempotent by hash: a screen already
+ * present is returned unchanged rather than written twice.
+ */
+export async function appendScreen(meta: BookMeta, screen: ScreenCapture): Promise<ScreenRecord | null> {
+  const signature = screen.columns.map((c) => c.hash).join('-')
+  const existing = meta.screens.find((s) => s.hashes.join('-') === signature)
+  if (existing) return null
+
+  const seq = meta.screens.length
+  const dir = bookDir(meta.bookId)
   await mkdir(dir, { recursive: true })
-  const names: string[] = []
+  const files: string[] = []
   for (const col of screen.columns) {
-    const name = screenFileName(chapterIndex, screenIndex, col.column)
+    const name = screenFileName(seq, col.column)
     await writeFile(join(dir, name), col.png)
-    names.push(name)
+    files.push(name)
   }
-  return names
+  const record: ScreenRecord = { seq, files, hashes: screen.columns.map((c) => c.hash), header: screen.header }
+  meta.screens.push(record)
+  return record
 }
 
-export function isChapterDone(meta: BookMeta, chapterIndex: number): boolean {
-  const rec = meta.captured[String(chapterIndex)]
-  if (!rec) return false
-  // 'failed' is worth retrying; the others are settled.
-  return rec.status !== 'failed'
-}
-
-export function recordChapter(meta: BookMeta, rec: ChapterRecord): void {
-  meta.captured[String(rec.index)] = rec
-}
-
-/** Every captured page, in reading order, for the renderer. */
-export function orderedPages(meta: BookMeta): Array<{ chapter: ChapterRecord; file: string; isChapterStart: boolean }> {
-  const out: Array<{ chapter: ChapterRecord; file: string; isChapterStart: boolean }> = []
-  const indices = Object.keys(meta.captured)
-    .map(Number)
-    .sort((a, b) => a - b)
-  for (const i of indices) {
-    const rec = meta.captured[String(i)]
-    for (const [n, file] of rec.files.entries()) {
-      out.push({ chapter: rec, file, isChapterStart: n === 0 })
+/**
+ * Every captured page in reading order.
+ *
+ * `isUnitStart` marks a page where the running header changed, which is where
+ * the renderer puts a chapter mark and hence a PDF bookmark.
+ */
+export function orderedPages(meta: BookMeta): Array<{ file: string; header: string | null; isUnitStart: boolean }> {
+  const out: Array<{ file: string; header: string | null; isUnitStart: boolean }> = []
+  let previousHeader: string | null = null
+  for (const screen of meta.screens) {
+    const changed = (screen.header ?? '') !== (previousHeader ?? '')
+    for (const [n, file] of screen.files.entries()) {
+      out.push({ file, header: screen.header, isUnitStart: changed && n === 0 })
     }
+    previousHeader = screen.header
   }
   return out
 }

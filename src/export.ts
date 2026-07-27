@@ -1,77 +1,88 @@
 /**
  * Exporting one Book to one PDF.
  *
- * Orchestrates the verified pieces: read the 目录, walk each Chapter capturing
- * canvas columns, cache as we go, then typeset the cache. Chapters are recorded
- * the moment they finish, so an interrupted run resumes rather than restarts.
+ * One linear pass: open the book at its first page and turn pages to the end,
+ * caching every screen as it appears, then typeset the cache.
+ *
+ * It does NOT walk chapter by chapter. WeRead's 节 can begin partway down a
+ * page, so pages do not partition cleanly per chapter: the running header lags
+ * by up to a page, and clicking a 节 in the 目录 lands on the page where it
+ * begins — which is often still headed by the previous 节. Per-chapter walking
+ * therefore either skipped content (a 节 mistaken for "already covered") or
+ * captured it twice. A linear pass can do neither.
  */
 import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { BrowserContext, Page } from 'playwright-core'
 import type { Book, Chapter } from './types.ts'
 import { readToc, gotoChapter, closeToc } from './bookshelf.ts'
-import { walkChapter, ensureLightTheme, restoreDarkTheme } from './capture.ts'
+import { walkBook, ensureLightTheme, restoreDarkTheme, waitForColumns, readHeader } from './capture.ts'
 import {
   initMeta,
-  isChapterDone,
-  recordChapter,
-  saveScreen,
+  appendScreen,
+  knownHashes,
+  lastHeader,
   writeMeta,
   clearBook,
   type BookMeta,
-  type ChapterStatus,
+  type WalkOutcome,
 } from './cache.ts'
 import { renderPdf } from './render.ts'
 
 /** Wording WeRead shows when the account cannot read further. */
-const PAYWALL_MARKERS = ['试读结束', '购买本书', '开通会员', '付费会员', '限时免费', '加入书架继续阅读']
+const PAYWALL_MARKERS = ['试读结束', '购买本书', '开通会员', '限时免费', '加入书架继续阅读']
 
 export interface ExportOptions {
   outDir: string
-  /** Restrict to these TOC indices. Omit for the whole book. */
-  onlyChapters?: number[]
   force?: boolean
-  /** Cap screens per chapter. Mainly useful for quick end-to-end checks. */
-  maxScreensPerChapter?: number
+  /** Cap screens for a quick end-to-end check. */
+  maxScreens?: number
   onProgress?: (msg: string) => void
 }
 
 export interface ExportResult {
   pdfPath: string
-  chaptersCaptured: number
-  chaptersSkipped: number
-  problems: Array<{ chapter: Chapter; status: ChapterStatus; note?: string }>
+  screensCaptured: number
+  screensSkipped: number
+  outcome: WalkOutcome
+  note?: string
 }
 
 async function detectAccessProblem(page: Page): Promise<string | null> {
   const text = await page.evaluate(() => document.body?.innerText ?? '')
-  const hit = PAYWALL_MARKERS.find((m) => text.includes(m))
-  return hit ?? null
+  return PAYWALL_MARKERS.find((m) => text.includes(m)) ?? null
+}
+
+/** TOC titles and running headers should match ignoring whitespace only. */
+export function sameTitle(a: string | null | undefined, b: string | null | undefined): boolean {
+  const norm = (s: string | null | undefined) => (s ?? '').replace(/\s+/g, '')
+  const left = norm(a)
+  return left.length > 0 && left === norm(b)
 }
 
 /**
- * Which TOC entries to walk.
+ * Pick where to start paging.
  *
- * The running header stays constant across a chapter's 节, and the walk stops
- * only when it changes — so starting at a level-1 entry already captures all of
- * its level-2 subsections. Walking the 节 as well would duplicate every page.
- * Level-2 entries are therefore navigation targets, not capture units.
+ * A fresh run starts at the first 目录 entry. A resumed run aims at the entry
+ * matching the last captured header, so it re-pages only a little before
+ * reaching new ground — hash-based caching makes that overlap harmless.
  */
-export function isCaptureUnit(chapters: Chapter[], index: number): boolean {
-  return chapters[index]?.level === 1
+export function resumeIndex(chapters: Chapter[], header: string | null): number {
+  if (!header) return 0
+  const found = chapters.findIndex((c) => sameTitle(c.title, header))
+  return found >= 0 ? found : 0
 }
 
 export async function exportBook(ctx: BrowserContext, book: Book, opts: ExportOptions): Promise<ExportResult> {
-  const { outDir, onlyChapters, force = false, maxScreensPerChapter, onProgress = () => {} } = opts
+  const { outDir, force = false, maxScreens, onProgress = () => {} } = opts
   await mkdir(outDir, { recursive: true })
   if (force) await clearBook(book.id)
 
   const page = await ctx.newPage()
-  const problems: ExportResult['problems'] = []
-  let captured = 0
-  let skipped = 0
   let meta: BookMeta
   let themeChanged = false
+  let outcome: WalkOutcome = 'failed'
+  let note: string | undefined
 
   try {
     onProgress(`打开《${book.title}》…`)
@@ -87,69 +98,38 @@ export async function exportBook(ctx: BrowserContext, book: Book, opts: ExportOp
     onProgress(`目录 ${chapters.length} 项`)
     meta = await initMeta(book.id, book.title, chapters)
 
-    // An explicit chapter list is honoured as given; otherwise walk the
-    // level-1 units, which subsume their 节.
-    const targets = chapters
-      .map((c) => c.index)
-      .filter((i) => (onlyChapters ? onlyChapters.includes(i) : isCaptureUnit(chapters, i)))
-
-    for (const index of targets) {
-      const chapter = chapters[index]
-      if (!force && isChapterDone(meta, index)) {
-        skipped++
-        onProgress(`跳过 ${index}. ${chapter.title}（已缓存）`)
-        continue
-      }
-
-      onProgress(`抓取 ${index}. ${chapter.title}`)
-      await gotoChapter(page, index)
-      await closeToc(page)
-
-      const files: string[] = []
-      let result
-      try {
-        result = await walkChapter(page, {
-          ...(maxScreensPerChapter ? { maxScreens: maxScreensPerChapter } : {}),
-          onScreen: async (screen, screenIndex) => {
-            files.push(...(await saveScreen(book.id, index, screenIndex, screen)))
-          },
-        })
-      } catch (e) {
-        recordChapter(meta, {
-          index,
-          title: chapter.title,
-          level: chapter.level,
-          status: 'failed',
-          screens: 0,
-          files,
-          note: (e as Error).message.split('\n')[0],
-        })
-        problems.push({ chapter, status: 'failed', note: (e as Error).message.split('\n')[0] })
-        await writeMeta(meta)
-        continue
-      }
-
-      let status: ChapterStatus = result.screenCount > 0 ? 'complete' : 'empty'
-      let note: string | undefined = result.stoppedBecause
-      if (result.screenCount === 0) {
-        const paywall = await detectAccessProblem(page)
-        if (paywall) {
-          status = 'unauthorized'
-          note = paywall
-        }
-      }
-
-      recordChapter(meta, { index, title: chapter.title, level: chapter.level, status, screens: result.screenCount, files, stoppedBecause: result.stoppedBecause, note })
-      await writeMeta(meta)
-
-      if (status === 'complete') {
-        captured++
-        onProgress(`  ✓ ${result.screenCount} 屏 / ${files.length} 页（${result.stoppedBecause}）`)
-      } else {
-        problems.push({ chapter, status, note })
-        onProgress(`  ⚠ ${status}${note ? `：${note}` : ''}`)
-      }
+    const startAt = resumeIndex(chapters, lastHeader(meta))
+    if (meta.screens.length) {
+      onProgress(`已缓存 ${meta.screens.length} 屏，从 #${startAt} ${chapters[startAt]?.title ?? ''} 续抓`)
     }
+    await gotoChapter(page, startAt)
+    await closeToc(page)
+    await waitForColumns(page)
+
+    const before = meta.screens.length
+    const result = await walkBook(page, {
+      known: knownHashes(meta),
+      ...(maxScreens ? { maxScreens } : {}),
+      onProgress,
+      onScreen: async (screen) => {
+        await appendScreen(meta, screen)
+        // Persist as we go: an interrupted run must keep what it captured.
+        if (meta.screens.length % 10 === 0) await writeMeta(meta)
+      },
+    })
+
+    onProgress(`共翻 ${result.screensSeen} 屏，新增 ${meta.screens.length - before} 屏（${result.stoppedBecause}）`)
+
+    if (result.stoppedBecause.startsWith('end of book')) outcome = 'complete'
+    else if (result.stoppedBecause.startsWith('hit maxScreens')) outcome = 'interrupted'
+    else {
+      const paywall = await detectAccessProblem(page)
+      outcome = paywall ? 'unauthorized' : 'interrupted'
+      note = paywall ?? result.stoppedBecause
+    }
+    meta.outcome = outcome
+    meta.note = note
+    await writeMeta(meta)
   } finally {
     // Leave the user's reader as we found it.
     if (themeChanged) await restoreDarkTheme(page).catch(() => {})
@@ -159,7 +139,16 @@ export async function exportBook(ctx: BrowserContext, book: Book, opts: ExportOp
   const safeTitle = book.title.replace(/[/\\:*?"<>|]/g, '_').slice(0, 80)
   const pdfPath = join(outDir, `${safeTitle}.pdf`)
   onProgress(`排版 PDF → ${pdfPath}`)
-  await renderPdf(ctx, meta, pdfPath, { author: undefined })
+  await renderPdf(ctx, meta, pdfPath)
 
-  return { pdfPath, chaptersCaptured: captured, chaptersSkipped: skipped, problems }
+  return {
+    pdfPath,
+    screensCaptured: meta.screens.length,
+    screensSkipped: 0,
+    outcome,
+    note,
+  }
 }
+
+// Re-exported for the header-verification helper used by dev scripts.
+export { readHeader }

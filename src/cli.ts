@@ -73,7 +73,7 @@ program
   .option('-f, --force', '忽略缓存，重新抓取', false)
   .option('--headed', '显示浏览器窗口', false)
   .option('--scale <n>', '抓取分辨率倍数（越大越清晰、文件越大）', '3')
-  .option('--chapters <list>', '只导出这些目录序号，如 12,13,14')
+  .option('--max-screens <n>', '最多翻多少屏（调试用）')
   .action(async (queries: string[], opts: Options) => {
     await withContext(
       async (ctx) => {
@@ -84,7 +84,6 @@ program
           return
         }
 
-        const chapters = opts.chapters?.split(',').map((s) => Number(s.trim())).filter((n) => Number.isInteger(n))
         let failed = false
 
         for (const book of chosen) {
@@ -92,18 +91,15 @@ program
           const result = await exportBook(ctx, book, {
             outDir: opts.out,
             force: opts.force,
-            ...(chapters?.length ? { onlyChapters: chapters } : {}),
+            ...(opts.maxScreens ? { maxScreens: Number(opts.maxScreens) } : {}),
             onProgress: (m) => console.log(`   ${m}`),
           })
           console.log(`\n  ✓ ${result.pdfPath}`)
-          console.log(`    抓取 ${result.chaptersCaptured} 章，跳过 ${result.chaptersSkipped} 章（已缓存）`)
-          if (result.problems.length) {
+          console.log(`    共 ${result.screensCaptured} 屏（${result.screensCaptured * 2} 页左右）`)
+          if (result.outcome !== 'complete') {
             failed = true
-            console.log(`    ⚠ ${result.problems.length} 章有问题：`)
-            for (const p of result.problems) {
-              console.log(`      · ${p.chapter.title} — ${describeStatus(p.status)}${p.note ? `（${p.note}）` : ''}`)
-            }
-            console.log(`    这些章节在 PDF 中有占位页；缓存在 ${bookDir(book.id)}`)
+            console.log(`    ⚠ ${describeOutcome(result.outcome)}${result.note ? `（${result.note}）` : ''}`)
+            console.log(`    PDF 末尾有说明页；缓存在 ${bookDir(book.id)}，重跑同一命令会续抓`)
           }
         }
         // Nothing silently incomplete: a gap in the book is a non-zero exit.
@@ -118,12 +114,12 @@ interface Options {
   force: boolean
   headed: boolean
   scale: string
-  chapters?: string
+  maxScreens?: string
 }
 
-function describeStatus(status: string): string {
-  if (status === 'unauthorized') return '未授权（试读已结束）'
-  if (status === 'empty') return '本章无正文'
+function describeOutcome(outcome: string): string {
+  if (outcome === 'unauthorized') return '未授权：试读已结束或未购买，后续内容无法导出'
+  if (outcome === 'interrupted') return '抓取中断，未翻到最后一页'
   return '抓取失败'
 }
 
