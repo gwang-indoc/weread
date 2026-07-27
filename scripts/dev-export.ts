@@ -13,7 +13,7 @@ const query = process.argv[2] ?? ''
 const maxScreens = Number(process.argv[3] ?? '8')
 
 async function main() {
-  const { browser, ctx } = await openAuthenticated({ headed: true, deviceScaleFactor: 3 })
+  const { browser, ctx } = await openAuthenticated({ headed: true })
   try {
     const books = await listBooks(ctx)
     const book = query ? resolveBook(books, query) : books[0]

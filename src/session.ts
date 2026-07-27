@@ -19,8 +19,12 @@ export interface OpenOptions {
   headed?: boolean
   /**
    * Capture resolution multiplier. Book text is painted to canvas, so this is
-   * what determines how legible the exported pages are; 3 keeps CJK glyphs
-   * crisp at A5 without inflating files unreasonably.
+   * the only thing determining how legible the exported pages are.
+   *
+   * 2 is the default on measured grounds: against 3 it is ~33% smaller on disk
+   * and visually indistinguishable up to 2x zoom, only going soft past 4x. Books
+   * whose detail you actually zoom into — manuscripts, dense diagrams — are
+   * worth passing 3 for. See README § `--scale` 怎么选.
    */
   deviceScaleFactor?: number
 }
@@ -77,7 +81,7 @@ async function launchBrowser(headed: boolean): Promise<Browser> {
 }
 
 /** A context that looks like an ordinary desktop Chrome in mainland China. */
-export async function open({ headed = false, deviceScaleFactor = 3 }: OpenOptions = {}): Promise<Opened> {
+export async function open({ headed = false, deviceScaleFactor = 2 }: OpenOptions = {}): Promise<Opened> {
   const browser = await launchBrowser(headed)
   const ctx = await browser.newContext({
     storageState: hasSession() ? SESSION_PATH : undefined,

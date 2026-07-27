@@ -96,9 +96,10 @@ program
   .option('-o, --out <dir>', '输出目录', 'out')
   .option('-f, --force', '忽略缓存，重新抓取', false)
   .option('--headed', '显示浏览器窗口', false)
-  .option('--scale <n>', '抓取分辨率倍数（越大越清晰、文件越大）', '3')
+  .option('--scale <n>', '抓取分辨率倍数（越大越清晰、文件越大）', '2')
   .option('--max-screens <n>', '最多翻多少屏（调试用）')
   .action(async (queries: string[], opts: Options) => {
+    const scale = Number(opts.scale) || 2
     await withContext(
       async (ctx) => {
         const books = await listBooks(ctx)
@@ -115,6 +116,7 @@ program
           const result = await exportBook(ctx, book, {
             outDir: opts.out,
             force: opts.force,
+            scale,
             ...(opts.maxScreens ? { maxScreens: Number(opts.maxScreens) } : {}),
             onProgress: (m) => console.log(`   ${m}`),
           })
@@ -129,7 +131,7 @@ program
         // Nothing silently incomplete: a gap in the book is a non-zero exit.
         if (failed) process.exitCode = 1
       },
-      { headed: opts.headed, deviceScaleFactor: Number(opts.scale) || 3 },
+      { headed: opts.headed, deviceScaleFactor: scale },
     )
   })
 

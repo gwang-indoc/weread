@@ -35,9 +35,31 @@ const PAYWALL_MARKERS = ['试读结束', '购买本书', '开通会员', '限时
 export interface ExportOptions {
   outDir: string
   force?: boolean
+  /** deviceScaleFactor in use, recorded so resumes can flag a change. */
+  scale?: number
   /** Cap screens for a quick end-to-end check. */
   maxScreens?: number
   onProgress?: (msg: string) => void
+}
+
+/**
+ * Warn when a resume would append pages at a different capture resolution than
+ * the ones already cached.
+ *
+ * Not an error — the PDF scales every column to the page, so a mixed-resolution
+ * book is readable — but it is a silent quality inconsistency otherwise, and
+ * this project's rule is that nothing uneven about an export is left implicit.
+ *
+ * Call only when screens are already cached. `previous` being undefined then
+ * means the cache predates this field, which is the riskiest case rather than a
+ * safe one: those screens were captured when the default was 3.
+ */
+export function scaleChangeWarning(previous: number | undefined, current: number): string | null {
+  if (previous === current) return null
+  if (previous === undefined) {
+    return `已缓存的页面没有记录分辨率（早于该字段，很可能是 --scale 3），本次是 ${current}；续抓会混入不同分辨率。要统一请加 --force 重抓（会丢弃已有缓存）`
+  }
+  return `已缓存的页面是 --scale ${previous} 抓的，本次是 ${current}；续抓会混入不同分辨率。要统一请加 --force 重抓（会丢弃已有缓存）`
 }
 
 export interface ExportResult {
@@ -74,7 +96,7 @@ export function resumeIndex(chapters: Chapter[], header: string | null): number 
 }
 
 export async function exportBook(ctx: BrowserContext, book: Book, opts: ExportOptions): Promise<ExportResult> {
-  const { outDir, force = false, maxScreens, onProgress = () => {} } = opts
+  const { outDir, force = false, scale = 2, maxScreens, onProgress = () => {} } = opts
   await mkdir(outDir, { recursive: true })
   if (force) await clearBook(book.id)
 
@@ -101,7 +123,10 @@ export async function exportBook(ctx: BrowserContext, book: Book, opts: ExportOp
     const startAt = resumeIndex(chapters, lastHeader(meta))
     if (meta.screens.length) {
       onProgress(`已缓存 ${meta.screens.length} 屏，从 #${startAt} ${chapters[startAt]?.title ?? ''} 续抓`)
+      const warning = scaleChangeWarning(meta.scale, scale)
+      if (warning) onProgress(`⚠ ${warning}`)
     }
+    meta.scale = scale
     await gotoChapter(page, startAt)
     await closeToc(page)
     await waitForColumns(page)

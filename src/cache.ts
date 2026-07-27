@@ -44,6 +44,12 @@ export interface BookMeta {
   title: string
   chapters: Chapter[]
   screens: ScreenRecord[]
+  /**
+   * deviceScaleFactor the screens were captured at. Recorded so a resumed run
+   * can tell the user it is about to append pages at a different resolution
+   * than the ones already stored.
+   */
+  scale?: number
   outcome?: WalkOutcome
   note?: string
   updatedAt: string

@@ -10,7 +10,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { bookIdFromUrl, resolveBook } from '../src/bookshelf.ts'
-import { sameTitle, resumeIndex } from '../src/export.ts'
+import { sameTitle, resumeIndex, scaleChangeWarning } from '../src/export.ts'
 import { chapterKeyOf } from '../src/capture.ts'
 import { screenFileName, orderedPages, knownHashes, lastHeader, CACHE_VERSION, type BookMeta } from '../src/cache.ts'
 import { buildHtml } from '../src/render.ts'
@@ -248,4 +248,24 @@ test('buildStatusHtml escapes book titles and headers', () => {
 
 test('buildStatusHtml is pure — same view, same document', () => {
   assert.equal(buildStatusHtml(statusFixture(), 'fixed'), buildStatusHtml(statusFixture(), 'fixed'))
+})
+
+test('scaleChangeWarning is silent only when the scale is unchanged', () => {
+  assert.equal(scaleChangeWarning(3, 3), null)
+  assert.equal(scaleChangeWarning(2, 2), null)
+
+  const changed = scaleChangeWarning(3, 2)
+  assert.ok(changed, 'a changed scale must be surfaced, not silently mixed')
+  assert.match(changed, /--scale 3/)
+  assert.match(changed, /--force/)
+})
+
+test('scaleChangeWarning treats an unrecorded scale as risky, not safe', () => {
+  // Only called when screens already exist, so a missing scale means the cache
+  // predates the field — captured back when the default was 3. Returning null
+  // here would silence the warning in exactly the case that needs it.
+  const warning = scaleChangeWarning(undefined, 2)
+  assert.ok(warning)
+  assert.match(warning, /没有记录分辨率/)
+  assert.match(warning, /--force/)
 })

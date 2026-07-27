@@ -105,9 +105,10 @@ read — it needs `--force` to re-capture. That is expected, not a bug.
 
 ## Open decisions — ask the owner, don't just pick
 
-1. **`--scale` default: keep 3 or drop to 2?** Measured (README has the table):
-   scale 2 is ~33% smaller, indistinguishable up to 2× zoom, soft past 4×. Left
-   at 3 pending a call. This was the last thing under discussion.
+1. ~~**`--scale` default: keep 3 or drop to 2?**~~ **Settled 2026-07-27: 2.**
+   Measured at ~33% smaller and indistinguishable up to 2× zoom. Books whose
+   detail you zoom into still want an explicit `--scale 3`. Changing scale on an
+   existing cache now warns rather than silently mixing resolutions.
 2. **Screenshots in the README?** Would mean committing PNGs; `out/` is
    gitignored. Not done.
 3. **Cover image and PDF author metadata** are not wired up — the cover is a
