@@ -190,4 +190,6 @@ node scripts/dev-export.ts "书名" 8        # 只翻 8 屏，端到端验证
 翻页，`cache` 按屏缓存（内容哈希去重），`render` 排版 PDF，`export` 串起整本书，
 `status` 状况面板，`cli` 命令行。
 
-术语见 [CONTEXT.md](CONTEXT.md)。
+术语见 [CONTEXT.md](CONTEXT.md)。接手这个项目请先读
+[docs/HANDOFF.md](docs/HANDOFF.md) —— 里面有踩过的坑、未决的决定，以及在真实账号上
+操作的注意事项。
