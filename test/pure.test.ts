@@ -14,6 +14,7 @@ import { sameTitle, resumeIndex } from '../src/export.ts'
 import { chapterKeyOf } from '../src/capture.ts'
 import { screenFileName, orderedPages, knownHashes, lastHeader, CACHE_VERSION, type BookMeta } from '../src/cache.ts'
 import { buildHtml } from '../src/render.ts'
+import { unitsOf, coverageOf, buildStatusHtml, type StatusView, type BookStatus } from '../src/status.ts'
 import type { Book, Chapter } from '../src/types.ts'
 
 const books: Book[] = [
@@ -147,4 +148,104 @@ test('buildHtml escapes titles so a book name cannot inject markup', () => {
   const html = buildHtml(meta)
   assert.ok(!html.includes('<script>alert(1)</script>'))
   assert.match(html, /&lt;script&gt;/)
+})
+
+/* ---------------------------------------------------------------- status report */
+
+test('unitsOf groups consecutive screens by running header', () => {
+  const units = unitsOf([
+    { seq: 0, header: '第一章 离弃' },
+    { seq: 1, header: '第一章 离弃' },
+    { seq: 2, header: '牛顿的家族' },
+    { seq: 3, header: '艾萨克·牛顿出世' },
+    { seq: 4, header: '艾萨克·牛顿出世' },
+  ])
+  assert.deepEqual(units, [
+    { header: '第一章 离弃', screens: 2, firstSeq: 0 },
+    { header: '牛顿的家族', screens: 1, firstSeq: 2 },
+    { header: '艾萨克·牛顿出世', screens: 2, firstSeq: 3 },
+  ])
+})
+
+test('unitsOf starts a new unit when a header recurs later', () => {
+  // Reading order is what the strip shows, so a header coming back after
+  // another one is a second visit, not a continuation of the first.
+  const units = unitsOf([
+    { seq: 0, header: '附录' },
+    { seq: 1, header: '卷二' },
+    { seq: 2, header: '附录' },
+  ])
+  assert.equal(units.length, 3)
+  assert.deepEqual(units.map((u) => u.firstSeq), [0, 1, 2])
+})
+
+test('unitsOf labels a missing header rather than dropping the screen', () => {
+  const units = unitsOf([{ seq: 0, header: null }, { seq: 1, header: null }])
+  assert.deepEqual(units, [{ header: '（无页眉）', screens: 2, firstSeq: 0 }])
+})
+
+function statusFixture(): StatusView {
+  const screens = [
+    { seq: 0, header: '第一章', columns: 2 },
+    { seq: 1, header: '第一章', columns: 2 },
+    { seq: 2, header: '第二节', columns: 1 },
+  ]
+  const book: BookStatus = {
+    id: 'b1', title: '测试书', legacy: false, chapters: 4,
+    screenCount: 3, pages: 5, bytes: 5 * 1048576,
+    outcome: 'interrupted', note: '下一页 not clickable',
+    updatedAt: '2026-07-27T02:00:00.000Z',
+    units: unitsOf(screens), screens,
+  }
+  return { books: [book], totals: { books: 1, screens: 3, pages: 5, bytes: 5 * 1048576 } }
+}
+
+test('coverageOf is units seen over TOC entries, and never exceeds 1', () => {
+  const view = statusFixture()
+  assert.equal(coverageOf(view.books[0]), 0.5) // 2 units / 4 entries
+  assert.equal(coverageOf({ ...view.books[0], chapters: 0 }), 0, 'no TOC means no ratio, not a divide by zero')
+  assert.equal(coverageOf({ ...view.books[0], chapters: 1 }), 1, 'more units than entries still caps at 1')
+})
+
+test('buildStatusHtml renders one tick per screen and one detail row per book', () => {
+  const html = buildStatusHtml(statusFixture())
+  assert.equal((html.match(/class="tick/g) ?? []).length, 3)
+  // One filmstrip row per book. (Counting <tbody> would also catch the units
+  // table nested inside that row, which is not the invariant being pinned.)
+  assert.equal((html.match(/class="detail"/g) ?? []).length, 1)
+  assert.match(html, /测试书/)
+})
+
+test('buildStatusHtml states an unfinished export and offers the resume command', () => {
+  const html = buildStatusHtml(statusFixture())
+  assert.match(html, /未抓完/)
+  assert.match(html, /需要处理/)
+  assert.match(html, /weread-export 测试书/)
+})
+
+test('buildStatusHtml flags a legacy cache as needing --force', () => {
+  const view = statusFixture()
+  view.books[0].legacy = true
+  const html = buildStatusHtml(view)
+  assert.match(html, /旧格式缓存/)
+  assert.match(html, /--force/)
+})
+
+test('buildStatusHtml says so plainly when nothing is cached', () => {
+  const html = buildStatusHtml({ books: [], totals: { books: 0, screens: 0, pages: 0, bytes: 0 } })
+  assert.match(html, /还没有任何缓存/)
+  assert.ok(!html.includes('class="tick'), 'no strip without screens')
+})
+
+test('buildStatusHtml escapes book titles and headers', () => {
+  const view = statusFixture()
+  view.books[0].title = '<img onerror=alert(1)>'
+  view.books[0].units[0].header = '</style><script>x</script>'
+  const html = buildStatusHtml(view)
+  assert.ok(!html.includes('<img onerror'))
+  assert.ok(!html.includes('<script>x</script>'))
+})
+
+test('buildStatusHtml is pure — same view, same document', () => {
+  assert.equal(buildStatusHtml(statusFixture(), 'fixed'), buildStatusHtml(statusFixture(), 'fixed'))
 })

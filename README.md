@@ -75,6 +75,7 @@ weread-export login          # 微信扫码登录，会话存到 ~/.config/werea
 weread-export list           # 列出书架
 weread-export                # 交互勾选要导出的书
 weread-export 算法 马斯克      # 直接指定书名，跳过交互
+weread-export status         # 生成缓存状况报告（HTML，不联网、不需登录）
 weread-export render 算法     # 只用缓存重新排版，不联网
 ```
 
@@ -148,3 +149,6 @@ node scripts/dev-export.ts "书名" 8        # 只翻 8 屏，端到端验证
 翻页，`cache` 按屏缓存（内容哈希去重），`render` 排版 PDF，`export` 串起整本书，`cli` 命令行。
 
 术语见 [CONTEXT.md](CONTEXT.md)。
+
+`weread-export status` 的界面是从 4 个方案里挑出来的，整套方案留在
+`prototype/dashboard-variants` 分支上作为原始资料。

@@ -6,6 +6,7 @@
  * the prompt so the same code path stays scriptable.
  */
 import { createRequire } from 'node:module'
+import { spawn } from 'node:child_process'
 import { Command } from 'commander'
 import { checkbox, Separator } from '@inquirer/prompts'
 import { login, openAuthenticated, SessionExpiredError, SESSION_PATH, hasSession } from './session.ts'
@@ -13,6 +14,7 @@ import { listBooks, resolveBook } from './bookshelf.ts'
 import { exportBook } from './export.ts'
 import { readMeta, cacheSize, bookDir } from './cache.ts'
 import { renderPdf } from './render.ts'
+import { collectStatus, writeStatusReport } from './status.ts'
 import type { Book } from './types.ts'
 
 // Resolves to the package root from both src/ and the built dist/, so the
@@ -48,6 +50,28 @@ program
         console.log(`  ${b.title}${cached}`)
       }
     })
+  })
+
+program
+  .command('status')
+  .description('生成一份本地缓存状况报告（HTML，不联网、不需登录）')
+  .option('-o, --out <file>', '输出文件', 'out/status.html')
+  .option('--open', '生成后直接打开', false)
+  .action(async (opts: { out: string; open: boolean }) => {
+    // Reads only the cache, so this deliberately skips withContext — no session
+    // and no browser needed, and it works while an export is running.
+    const view = collectStatus()
+    const url = await writeStatusReport(opts.out, view)
+    console.log(`\n  ${view.totals.books} 本 · ${view.totals.screens} 屏 · ${view.totals.pages} 张页图 · ${(view.totals.bytes / 1048576).toFixed(1)} MB`)
+    for (const b of view.books) {
+      const state = b.legacy ? '旧格式' : `${b.screenCount} 屏 · ${b.units.length}/${b.chapters} 单元 · ${b.outcome ?? '-'}`
+      console.log(`    · ${b.title} — ${state}`)
+    }
+    console.log(`\n  ${url}\n`)
+    if (opts.open) {
+      const cmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open'
+      spawn(cmd, [url], { stdio: 'ignore', detached: true, shell: process.platform === 'win32' }).unref()
+    }
   })
 
 program
