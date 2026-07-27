@@ -75,9 +75,60 @@ weread-export login          # 微信扫码登录，会话存到 ~/.config/werea
 weread-export list           # 列出书架
 weread-export                # 交互勾选要导出的书
 weread-export 算法 马斯克      # 直接指定书名，跳过交互
-weread-export status         # 生成缓存状况报告（HTML，不联网、不需登录）
+weread-export status         # 状况面板（HTML，不联网、不需登录）
 weread-export render 算法     # 只用缓存重新排版，不联网
 ```
+
+### 状况面板
+
+一本书要翻几百屏、几百 MB，跑完之后光看命令行输出很难知道到底落了什么。
+`weread-export status` 生成一张本地 HTML 报告：
+
+```bash
+weread-export status              # 生成并打印 file:// 链接
+weread-export status --open       # 顺手打开
+weread-export status -o ~/x.html  # 换个输出位置
+```
+
+它**只读 `~/.cache/weread-export`**，所以和其他命令不同：不需要登录、不启动浏览器、
+离线可用，**导出正在跑的时候也能用**（想看进度就再生成一次）。
+
+面板上有四块：
+
+- **缓存总量** —— 体积、屏数、页数、平均每页多少 KB；
+- **逐本表格** —— 状态、已覆盖单元（meter）、屏数/页图/体积/更新时间；
+- **条带** —— 每本书的阅读顺序，一格一屏，深浅交替表示换单元。
+  **连续无缺口就说明线性走法没漏页** —— 这是它比一个百分比更有用的地方；
+- **需要处理** —— 未抓完或旧格式缓存的书，以及该敲哪条命令。
+
+展开条带下面的折叠还有「每个单元抓了多少屏」的柱状图和完整单元表格。
+
+界面是从 4 个方案里挑出来的（表格 + 条带的组合），整套方案连同切换器留在
+`prototype/dashboard-variants` 分支上作为原始资料。
+
+### 导出选项
+
+| 选项 | 说明 |
+| --- | --- |
+| `-o, --out <dir>` | 输出目录，默认 `out/` |
+| `-f, --force` | 忽略缓存重新抓取 |
+| `--scale <n>` | 抓取分辨率倍数，默认 3（见下） |
+| `--max-screens <n>` | 最多翻多少屏（调试用） |
+| `--headed` | 显示浏览器窗口 |
+
+### `--scale` 怎么选
+
+实测同一屏正文（《牛顿传》序言）：
+
+| | 单栏像素 | 单页 | 一本约 400 页时 |
+| --- | --- | --- | --- |
+| `--scale 3`（默认） | 1179×2310 | 145–315 KB | ~400 MB |
+| `--scale 2` | 786×1540 | 96–211 KB | **~270 MB** |
+
+省约 **33%**（像素面积只有 44%，但 PNG 压中文正文时体积基本随边长走，不随面积）。
+清晰度上：A5 实际尺寸和放大 2× 以内两者**肉眼无差**；放大到 4× 以上 `--scale 2`
+才开始发虚。所以纯读文字 `--scale 2` 足够，会放大抠插图细节（手稿、图表类的书）
+再用默认的 3。`--scale` 只影响分辨率，**不改变排版和断行**（已核对过断行一致）。
 
 ### 浏览器要求
 
@@ -92,16 +143,6 @@ npx playwright install chromium
 ```
 
 Node 需要 20.11 以上。
-
-常用选项：
-
-| 选项 | 说明 |
-| --- | --- |
-| `-o, --out <dir>` | 输出目录，默认 `out/` |
-| `-f, --force` | 忽略缓存重新抓取 |
-| `--scale <n>` | 抓取分辨率倍数，默认 3（越大越清晰、文件越大） |
-| `--max-screens <n>` | 最多翻多少屏（调试用） |
-| `--headed` | 显示浏览器窗口 |
 
 ## 它是怎么工作的
 
@@ -146,9 +187,7 @@ node scripts/dev-export.ts "书名" 8        # 只翻 8 屏，端到端验证
 和构建）。本地验证打包结果：`npm pack` 然后 `npx ./weread-export-0.1.0.tgz --help`。
 
 `src/` 各模块：`session` 登录与会话，`bookshelf` 书架与目录，`capture` canvas 截取与
-翻页，`cache` 按屏缓存（内容哈希去重），`render` 排版 PDF，`export` 串起整本书，`cli` 命令行。
+翻页，`cache` 按屏缓存（内容哈希去重），`render` 排版 PDF，`export` 串起整本书，
+`status` 状况面板，`cli` 命令行。
 
 术语见 [CONTEXT.md](CONTEXT.md)。
-
-`weread-export status` 的界面是从 4 个方案里挑出来的，整套方案留在
-`prototype/dashboard-variants` 分支上作为原始资料。
