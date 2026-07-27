@@ -27,8 +27,8 @@
     "docs/adr"
   ],
   "scripts": {
-    "build": "rm -rf dist && tsc -p tsconfig.build.json",
-    "prepare": "tsc -p tsconfig.build.json",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && node scripts/chmod-bin.mjs",
+    "prepare": "tsc -p tsconfig.build.json && node scripts/chmod-bin.mjs",
     "start": "node src/cli.ts",
     "test": "node --test \"test/**/*.test.ts\"",
     "test:live": "node scripts/dev-export.ts",
