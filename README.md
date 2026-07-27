@@ -7,24 +7,45 @@
 
 ## 安装
 
-仓库是私有的，用 SSH 拉取（复用你已有的 SSH key，不会弹钥匙串、不需要 token）。装成
-全局命令一次，之后命令就很短：
+仓库是私有的，用 SSH 拉取。先在 `~/.ssh/config` 里加一个别名（一次性）：
 
-```bash
-npm i -g git+ssh://git@github.com/gwang-indoc/weread.git
+```
+Host github-weread
+  HostName github.com
+  User git
+  IdentityFile ~/.ssh/id_ed25519    # 换成你自己的 key
 ```
 
-> `npx github:owner/repo` 这种简写只走 HTTPS，私有仓库会触发 macOS 钥匙串授权弹窗
-> （`git-credential-osxkeychain`）。用上面的完整 SSH URL 可以完全避开。
+然后装成全局命令：
+
+```bash
+npm i -g git+ssh://git@github-weread/gwang-indoc/weread.git
+weread-export login
+```
 
 也可以不安装、每次临时跑：
 
 ```bash
-npx git+ssh://git@github.com/gwang-indoc/weread.git list
+npx git+ssh://git@github-weread/gwang-indoc/weread.git list
 ```
+
+### 为什么要用别名，而不是直接写 github.com
+
+npm 的 `hosted-git-info` 会认出 `github.com`，把 SSH URL "优化"成 codeload 的 HTTPS
+tarball 下载（对公开仓库确实更快）。但**私有仓库**这一步需要认证，于是 git 调用
+`credential.helper`（Homebrew 的 git 在 `/opt/homebrew/etc/gitconfig` 里默认配了
+`osxkeychain`），macOS 就弹出钥匙串授权框。
+
+npm 认不出 `github-weread` 这个主机名，就会老实地走 `git clone` + SSH，不碰 HTTPS，
+也就不会有弹窗。验证方式：`npm i --loglevel silly ...` 的日志里 `codeload` 出现 0 次。
+
+顺带说明：即使碰到那个弹窗，点 Deny 安装**也会成功** —— HTTPS 失败后 npm 会退回 SSH。
+它是噪音，不是错误。
 
 安装时 npm 会克隆仓库、装依赖并自动编译（`prepare` 脚本），大约十几秒。想升级到最新
 代码就重新执行一次上面的 `npm i -g`。
+
+> 给同事用的话，他们也要先加同名别名，并且拥有这个私有仓库的访问权限。
 
 ## 用法
 
