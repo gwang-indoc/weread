@@ -36,7 +36,7 @@ import {
   collectQa,
 } from '../src/epub.ts'
 import { crc32, zip } from '../src/zip.ts'
-import { sameTitle, resumeIndex, scaleChangeWarning } from '../src/export.ts'
+import { sameTitle, resumeIndex, scaleChangeWarning, looksTruncated, restSchedule } from '../src/export.ts'
 import { chapterKeyOf } from '../src/capture.ts'
 import { screenFileName, orderedPages, knownHashes, lastHeader, CACHE_VERSION, type BookMeta } from '../src/cache.ts'
 import { buildHtml } from '../src/render.ts'
@@ -100,6 +100,67 @@ test('resumeIndex aims a resumed walk at the last header seen', () => {
   assert.equal(resumeIndex(chapters, '第一章 离弃'), 2)
   assert.equal(resumeIndex(chapters, null), 0, 'a fresh run starts at the beginning')
   assert.equal(resumeIndex(chapters, '这本书里没有的标题'), 0, 'an unknown header restarts from the beginning')
+})
+
+test('looksTruncated tells a stalled reader from the end of the book', () => {
+  // Both present identically — 下一页 stops advancing and the same pixels come
+  // back — so the 目录 position is what separates them. Without this, a stall is
+  // recorded as a complete export and the retry never fires.
+  const toc: Chapter[] = [
+    { index: 0, level: 1, title: '第一章' },
+    { index: 1, level: 2, title: '第一节' },
+    { index: 2, level: 2, title: '第二节' },
+    { index: 3, level: 1, title: '第二章' },
+    { index: 4, level: 1, title: '附录' },
+    { index: 5, level: 1, title: '版权信息' },
+  ]
+  // 6 entries -> tolerance 1, so only the final entry reads as the end.
+  assert.equal(looksTruncated(toc, '第一章'), true, 'stopped at entry 0 of 6 — a stall')
+  assert.equal(looksTruncated(toc, '第二节'), true)
+  assert.equal(looksTruncated(toc, '附录'), true)
+  assert.equal(looksTruncated(toc, '版权信息'), false, 'the last entry — genuinely the end')
+})
+
+test('the end-of-book tolerance scales with the length of the 目录', () => {
+  // Trailing 版权信息 / colophon entries are DOM, never become a header, so the
+  // walk ends a few entries short of a long 目录. But a fixed allowance of three
+  // would be half of a short one, and over-generous here means a truncated book
+  // is silently reported complete.
+  const toc = (n: number): Chapter[] =>
+    Array.from({ length: n }, (_, i) => ({ index: i, level: 1, title: `第${i}章` }))
+
+  // 200 entries -> tolerance 3: stopping 4 from the end is still a stall.
+  assert.equal(looksTruncated(toc(200), '第196章'), true)
+  assert.equal(looksTruncated(toc(200), '第197章'), false)
+
+  // 8 entries -> tolerance 2.
+  assert.equal(looksTruncated(toc(8), '第5章'), true)
+  assert.equal(looksTruncated(toc(8), '第6章'), false)
+
+  // A 3-entry book must still be completable — tolerance floors at 1.
+  assert.equal(looksTruncated(toc(3), '第2章'), false)
+  assert.equal(looksTruncated(toc(3), '第1章'), true)
+})
+
+test('looksTruncated treats an unrecognised header as the end, not as a stall', () => {
+  // Headers lag and do not always match an entry (ADR 0002). Guessing "truncated"
+  // here would retry forever at a real end of book, five minutes at a time.
+  assert.equal(looksTruncated(chapters, '这本书里没有的标题'), false)
+  assert.equal(looksTruncated(chapters, null), false)
+  assert.equal(looksTruncated([], '第一章 离弃'), false)
+})
+
+test('restSchedule splits the rest into chunks that sum to exactly the wait', () => {
+  const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0)
+  assert.deepEqual(restSchedule(5 * 60_000), [60_000, 60_000, 60_000, 60_000, 60_000])
+  assert.deepEqual(restSchedule(90_000), [60_000, 30_000])
+  assert.deepEqual(restSchedule(30_000), [30_000])
+  assert.deepEqual(restSchedule(60_000), [60_000])
+  assert.deepEqual(restSchedule(0), [], 'no rest means no waiting at all')
+  assert.deepEqual(restSchedule(-1), [])
+  for (const total of [1, 999, 60_001, 5 * 60_000, 17 * 60_000 + 13]) {
+    assert.equal(sum(restSchedule(total)), total, `chunks must sum to ${total}`)
+  }
 })
 
 test('screen file names sort into reading order as plain strings', () => {

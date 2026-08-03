@@ -68,6 +68,17 @@ All of these are already handled in the code — this list exists so you don't
   header lags by up to a page and clicking a 节 in the 目录 lands on a page still
   headed by the previous one. ADR 0002 — three fixes failed before the linear
   walk.
+- **"The book ended" and "the page turn failed" are the same observation.** Both
+  are: 下一页 was clicked and the same pixels came back. `walkBook` reports both as
+  `end of book (screen repeated)`, so taking that at face value records a stalled
+  reader as a *complete* export — and the auto-resume, which waits for
+  `interrupted`, would never fire. `looksTruncated()` breaks the tie on 目录
+  position, since we already know how long the book is. Its tolerance is capped as
+  a fraction of the 目录 as well as absolutely: three entries is under 4% of a
+  196-entry book but half of a six-entry one, and being generous is what passes a
+  truncated book off as finished. A header *absent* from the 目录 deliberately
+  reads as the end, because `resumeIndex` collapses an unknown header to 0, which
+  would otherwise look like "still at the beginning" and retry forever.
 - **The 目录 panel's backdrop is a full-viewport `.wr_mask` with
   `pointer-events:auto`.** Leaving the panel open makes every later click time
   out. `closeToc()` exists for this; call it after navigating.
@@ -162,6 +173,14 @@ is 298 screens / 358 MB of an 86-entry book, stopped by `--max-screens`. Unteste
 at full scale: total wall-clock, cache size, the 400-screens-per-walk guard, and
 the 未授权 (trial-expired) code path, which has never once triggered against a
 real book.
+
+**The auto-resume loop has not run live either.** Its decision table was checked
+by simulation against the real `looksTruncated`/`restSchedule` helpers — stall
+mid-book retries and eventually completes, a genuine end completes on the first
+pass without burning a wait, no-progress stops after two futile attempts,
+`--max-screens` never retries — but no actual stalled reader has been observed
+recovering after a reload. That reload is the assumed fix; if resuming turns out
+not to help, that assumption is the thing to question first.
 
 The local cache currently holds three books: two v2 (17 and 298 screens, both
 `interrupted`) and one **v1 legacy** that `readMeta` deliberately refuses to

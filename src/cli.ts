@@ -138,15 +138,25 @@ program
   .option('-f, --force', '忽略缓存，重新抓取', false)
   .option('--headed', '显示浏览器窗口', false)
   .option('--scale <n>', '抓取分辨率倍数（越大越清晰、文件越大）', '2')
-  .option('--format <fmt>', '输出格式：pdf、epub 或 both', 'pdf')
+  .option('--format <fmt>', '输出格式：epub、pdf 或 both', 'epub')
+  .option('--retry-delay <min>', '抓取中断后休息几分钟再继续，0 表示不重试', '5')
+  .option('--max-attempts <n>', '最多尝试几次', '20')
   .option('--max-screens <n>', '最多翻多少屏（调试用）')
   .action(async (queries: string[], opts: Options) => {
     const scale = Number(opts.scale) || 2
     if (!['pdf', 'epub', 'both'].includes(opts.format)) {
-      throw new Error(`--format 只能是 pdf、epub 或 both，收到「${opts.format}」`)
+      throw new Error(`--format 只能是 epub、pdf 或 both，收到「${opts.format}」`)
     }
     const wantPdf = opts.format !== 'epub'
     const wantEpub = opts.format !== 'pdf'
+    const retryMinutes = Number(opts.retryDelay)
+    if (!Number.isFinite(retryMinutes) || retryMinutes < 0) {
+      throw new Error(`--retry-delay 需要是不小于 0 的分钟数，收到「${opts.retryDelay}」`)
+    }
+    const maxAttempts = Number(opts.maxAttempts)
+    if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
+      throw new Error(`--max-attempts 需要是不小于 1 的整数，收到「${opts.maxAttempts}」`)
+    }
     await withContext(
       async (ctx) => {
         const books = await listBooks(ctx)
@@ -165,11 +175,16 @@ program
             force: opts.force,
             scale,
             renderPdf: wantPdf,
+            retryDelayMs: retryMinutes * 60_000,
+            maxAttempts,
             ...(opts.maxScreens ? { maxScreens: Number(opts.maxScreens) } : {}),
             onProgress: (m) => console.log(`   ${m}`),
           })
           if (result.pdfPath) console.log(`\n  ✓ ${result.pdfPath}`)
-          console.log(`    共 ${result.screensCaptured} 屏（${result.screensCaptured * 2} 页左右）`)
+          console.log(
+            `    共 ${result.screensCaptured} 屏（${result.screensCaptured * 2} 页左右）` +
+              (result.attempts > 1 ? ` · ${result.attempts} 次尝试` : ''),
+          )
 
           if (wantEpub) {
             const meta = await readMeta(book.id)
@@ -205,6 +220,8 @@ interface Options {
   headed: boolean
   scale: string
   format: string
+  retryDelay: string
+  maxAttempts: string
   maxScreens?: string
 }
 
