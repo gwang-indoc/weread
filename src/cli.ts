@@ -7,13 +7,16 @@
  */
 import { createRequire } from 'node:module'
 import { spawn } from 'node:child_process'
+import { statSync } from 'node:fs'
 import { Command } from 'commander'
 import { checkbox, Separator } from '@inquirer/prompts'
 import { login, openAuthenticated, SessionExpiredError, SESSION_PATH, hasSession } from './session.ts'
 import { listBooks, resolveBook } from './bookshelf.ts'
 import { exportBook } from './export.ts'
-import { readMeta, cacheSize, bookDir } from './cache.ts'
+import { readMeta, cacheSize, bookDir, listCachedBooks } from './cache.ts'
 import { renderPdf } from './render.ts'
+import { exportEpub } from './epub.ts'
+import { OcrUnavailableError } from './ocr.ts'
 import { collectStatus, writeStatusReport } from './status.ts'
 import type { Book } from './types.ts'
 
@@ -25,8 +28,12 @@ const program = new Command()
 
 program
   .name('weread-export')
-  .description('导出微信读书中你有权阅读的书籍为 PDF（仅供个人使用）')
+  .description('导出微信读书中你有权阅读的书籍为 PDF 或 EPUB（仅供个人使用）')
   .version(version)
+  // Without this, the program's own `-o` swallows the flag before a subcommand
+  // sees it, because commander lets program options appear anywhere by default.
+  // `status -o x.html` and `render -o dir` both silently wrote to `out/`.
+  .enablePositionalOptions()
 
 program
   .command('login')
@@ -92,14 +99,54 @@ program
   })
 
 program
+  .command('epub <query>')
+  .description('把已缓存的书 OCR 成可重排的 EPUB，不联网、不需登录（仅 macOS）')
+  .option('-o, --out <dir>', '输出目录', 'out')
+  .option('--author <name>', '作者，写入 EPUB 元数据')
+  .option('--force', '忽略已有 OCR 结果，重新识别', false)
+  .action(async (query: string, opts: { out: string; author?: string; force: boolean }) => {
+    // Reads only the cache, so no session and no browser — same as `status`.
+    const book = resolveBook(listCachedBooks(), query)
+    const meta = await readMeta(book.id)
+    if (!meta) throw new Error(`《${book.title}》的缓存是旧格式，需要用 --force 重抓`)
+
+    const safe = book.title.replace(/[/\\:*?"<>|]/g, '_').slice(0, 80)
+    const result = await exportEpub(meta, `${opts.out}/${safe}.epub`, {
+      force: opts.force,
+      ...(opts.author ? { author: opts.author } : {}),
+      onProgress: (m) => console.log(`   ${m}`),
+    })
+
+    const bytes = statSync(result.path).size
+    console.log(`\n  ✓ ${result.path}`)
+    console.log(
+      `    ${result.chapters} 章 · ${result.paragraphs} 段 · ${result.characters.toLocaleString('zh')} 字 · ` +
+        `${result.images} 张图 · ${(bytes / 1048576).toFixed(1)} MB`,
+    )
+    // Never presented as a quality score: it is the list of places to check.
+    if (result.suspects) {
+      console.log(`    ⚠ ${result.suspects} 处 OCR 置信度偏低，书末「关于这个文件」列出了它们`)
+    }
+    if (meta.outcome && meta.outcome !== 'complete') {
+      console.log(`    ⚠ ${describeOutcome(meta.outcome)}；EPUB 末尾有说明`)
+    }
+  })
+
+program
   .argument('[books...]', '书名（可传多个）；不传则进入交互选择')
   .option('-o, --out <dir>', '输出目录', 'out')
   .option('-f, --force', '忽略缓存，重新抓取', false)
   .option('--headed', '显示浏览器窗口', false)
   .option('--scale <n>', '抓取分辨率倍数（越大越清晰、文件越大）', '2')
+  .option('--format <fmt>', '输出格式：pdf、epub 或 both', 'pdf')
   .option('--max-screens <n>', '最多翻多少屏（调试用）')
   .action(async (queries: string[], opts: Options) => {
     const scale = Number(opts.scale) || 2
+    if (!['pdf', 'epub', 'both'].includes(opts.format)) {
+      throw new Error(`--format 只能是 pdf、epub 或 both，收到「${opts.format}」`)
+    }
+    const wantPdf = opts.format !== 'epub'
+    const wantEpub = opts.format !== 'pdf'
     await withContext(
       async (ctx) => {
         const books = await listBooks(ctx)
@@ -117,11 +164,28 @@ program
             outDir: opts.out,
             force: opts.force,
             scale,
+            renderPdf: wantPdf,
             ...(opts.maxScreens ? { maxScreens: Number(opts.maxScreens) } : {}),
             onProgress: (m) => console.log(`   ${m}`),
           })
-          console.log(`\n  ✓ ${result.pdfPath}`)
+          if (result.pdfPath) console.log(`\n  ✓ ${result.pdfPath}`)
           console.log(`    共 ${result.screensCaptured} 屏（${result.screensCaptured * 2} 页左右）`)
+
+          if (wantEpub) {
+            const meta = await readMeta(book.id)
+            if (meta) {
+              const safe = book.title.replace(/[/\\:*?"<>|]/g, '_').slice(0, 80)
+              const epub = await exportEpub(meta, `${opts.out}/${safe}.epub`, {
+                onProgress: (m) => console.log(`   ${m}`),
+              })
+              console.log(`  ✓ ${epub.path}`)
+              console.log(
+                `    ${epub.chapters} 章 · ${epub.paragraphs} 段 · ${epub.characters.toLocaleString('zh')} 字 · ${epub.images} 张图`,
+              )
+              if (epub.suspects) console.log(`    ⚠ ${epub.suspects} 处 OCR 置信度偏低，见书末说明`)
+            }
+          }
+
           if (result.outcome !== 'complete') {
             failed = true
             console.log(`    ⚠ ${describeOutcome(result.outcome)}${result.note ? `（${result.note}）` : ''}`)
@@ -140,6 +204,7 @@ interface Options {
   force: boolean
   headed: boolean
   scale: string
+  format: string
   maxScreens?: string
 }
 
@@ -187,6 +252,9 @@ async function withContext(
 program.parseAsync(process.argv).catch((e) => {
   if (e instanceof SessionExpiredError) {
     console.error(`\n  ✗ 会话已过期，请重新运行：weread-export login`)
+  } else if (e instanceof OcrUnavailableError) {
+    // Not a bug and not the user's mistake: EPUB needs Vision, PDF does not.
+    console.error(`\n  ✗ ${e.message}`)
   } else if (e && typeof e === 'object' && 'name' in e && e.name === 'ExitPromptError') {
     console.error('\n  已取消')
   } else {

@@ -1,11 +1,13 @@
 {
   "name": "weread-export",
   "version": "0.1.0",
-  "description": "把微信读书里你有权阅读的书导出成 PDF（仅供个人使用）/ Export books you can read on WeRead to PDF",
+  "description": "把微信读书里你有权阅读的书导出成 PDF 或 EPUB（仅供个人使用）/ Export books you can read on WeRead to PDF or EPUB",
   "keywords": [
     "weread",
     "微信读书",
     "pdf",
+    "epub",
+    "ocr",
     "export",
     "ebook",
     "cli",

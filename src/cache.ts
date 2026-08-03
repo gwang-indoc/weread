@@ -13,7 +13,7 @@
  * Chapter titles are recorded per screen as labels, for bookmarks and headers.
  */
 import { mkdir, readFile, writeFile, rm, readdir } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { Chapter } from './types.ts'
@@ -137,17 +137,49 @@ export async function appendScreen(meta: BookMeta, screen: ScreenCapture): Promi
  * `isUnitStart` marks a page where the running header changed, which is where
  * the renderer puts a chapter mark and hence a PDF bookmark.
  */
-export function orderedPages(meta: BookMeta): Array<{ file: string; header: string | null; isUnitStart: boolean }> {
-  const out: Array<{ file: string; header: string | null; isUnitStart: boolean }> = []
+export interface OrderedPage {
+  file: string
+  /** Content hash of this column — its identity, and the OCR cache key. */
+  hash: string
+  header: string | null
+  isUnitStart: boolean
+}
+
+export function orderedPages(meta: BookMeta): OrderedPage[] {
+  const out: OrderedPage[] = []
   let previousHeader: string | null = null
   for (const screen of meta.screens) {
     const changed = (screen.header ?? '') !== (previousHeader ?? '')
     for (const [n, file] of screen.files.entries()) {
-      out.push({ file, header: screen.header, isUnitStart: changed && n === 0 })
+      out.push({ file, hash: screen.hashes[n] ?? '', header: screen.header, isUnitStart: changed && n === 0 })
     }
     previousHeader = screen.header
   }
   return out
+}
+
+/**
+ * Every book in the cache, as Books — so `resolveBook` can match a title
+ * without a session or a browser.
+ *
+ * This is what lets `epub` and `render` work offline: the cache already knows
+ * every title it holds, and re-reading the 书架 over the network to learn a name
+ * we have on disk would be the only thing forcing a login.
+ */
+export function listCachedBooks(): Array<{ id: string; title: string; readerUrl: string }> {
+  if (!existsSync(CACHE_ROOT)) return []
+  const out: Array<{ id: string; title: string; readerUrl: string }> = []
+  for (const id of readdirSync(CACHE_ROOT)) {
+    const path = join(CACHE_ROOT, id, 'meta.json')
+    if (!existsSync(path)) continue
+    try {
+      const meta = JSON.parse(readFileSync(path, 'utf8')) as Partial<BookMeta>
+      if (meta.title) out.push({ id, title: meta.title, readerUrl: `https://weread.qq.com/web/reader/${id}` })
+    } catch {
+      // A corrupt meta.json is simply not offered as a choice.
+    }
+  }
+  return out.sort((a, b) => a.title.localeCompare(b.title, 'zh'))
 }
 
 export async function clearBook(bookId: string): Promise<void> {

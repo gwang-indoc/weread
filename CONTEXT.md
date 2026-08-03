@@ -9,9 +9,10 @@ no decisions. Decisions live in `docs/adr/`.
 (`/web/reader/<bookId>`). A Book is the thing you read; it is not the file we
 produce. See [[Export]].
 
-**Export** — one PDF produced from one Book. Exporting never modifies the Book;
-it is a read-only projection of it. Several Exports of the same Book may exist
-over time as the [[Capture]]s are re-typeset.
+**Export** — one file produced from one Book, either a PDF of the page images or
+an EPUB of [[Recognised Text]]. Exporting never modifies the Book; it is a
+read-only projection of it. Several Exports of the same Book may exist over time
+as the [[Capture]]s are re-typeset or re-read.
 
 **Chapter** — an entry in a Book's 目录. Chapters have a **level**: level 1 is a
 top-level 章 (or a 分卷 heading), level 2 is a 节 nested beneath it. A Chapter is
@@ -44,6 +45,31 @@ Chapter, because Chapter boundaries do not fall on page boundaries.
 current 节 and lags the display by up to a page, so it is a **label** attached to
 a captured [[Screen]] — never an identity and never a boundary. It is what
 Chapter marks and PDF bookmarks are derived from.
+
+**Recognised Text** — what OCR reads out of a [[Capture]]: a set of **Lines**,
+each with the text, a confidence, and a box in coordinates relative to the
+[[Column]]. It is a reading of the Book, never the Book itself — there is no
+source text to check it against, so an EPUB [[Export]] carries a [[Quality
+Report]] rather than a claim of correctness.
+
+**Line** — one recognised line of text. Recognition happens in overlapping
+**Bands**, so the same Line is usually read more than once and the readings
+differ; the Line kept is the most confident of them, with a box that is the union
+of all of them.
+
+**Block** — what a [[Column]] is interpreted as: a Paragraph, a Heading or a
+Plate, in reading order. Paragraphs are rebuilt from the geometry of the Lines
+and stitched across Columns, because a Column is WeRead's pagination rather than
+the Book's structure.
+
+**Plate** — an illustration, recovered by cropping a region of a [[Capture]] that
+holds a picture rather than text. Which regions those are is decided from the
+pixels: every Column ends in white space, so the recognised text alone cannot
+tell a picture from a margin.
+
+**Quality Report** — the closing section of an EPUB [[Export]], listing what OCR
+could not recover and every Line it was unsure of. It names places to check; it
+never scores the text, because a score would imply the rest is verified.
 
 **Session** — the stored WeRead credentials for one account. Sessions expire
 after days rather than months, so expiry is an ordinary event, not an error.

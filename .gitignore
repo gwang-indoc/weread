@@ -3,6 +3,7 @@ dist/
 spike-out/
 out/
 *.pdf
+*.epub
 .DS_Store
 *.tgz
 .claude/

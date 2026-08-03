@@ -39,6 +39,11 @@ export interface ExportOptions {
   scale?: number
   /** Cap screens for a quick end-to-end check. */
   maxScreens?: number
+  /**
+   * Typeset the PDF after capture. Off when the caller only wants an EPUB, so
+   * `--format epub` does not also write hundreds of megabytes nobody asked for.
+   */
+  renderPdf?: boolean
   onProgress?: (msg: string) => void
 }
 
@@ -63,7 +68,8 @@ export function scaleChangeWarning(previous: number | undefined, current: number
 }
 
 export interface ExportResult {
-  pdfPath: string
+  /** Null when PDF typesetting was skipped. */
+  pdfPath: string | null
   screensCaptured: number
   screensSkipped: number
   outcome: WalkOutcome
@@ -96,7 +102,7 @@ export function resumeIndex(chapters: Chapter[], header: string | null): number 
 }
 
 export async function exportBook(ctx: BrowserContext, book: Book, opts: ExportOptions): Promise<ExportResult> {
-  const { outDir, force = false, scale = 2, maxScreens, onProgress = () => {} } = opts
+  const { outDir, force = false, scale = 2, maxScreens, renderPdf: wantPdf = true, onProgress = () => {} } = opts
   await mkdir(outDir, { recursive: true })
   if (force) await clearBook(book.id)
 
@@ -162,9 +168,12 @@ export async function exportBook(ctx: BrowserContext, book: Book, opts: ExportOp
   }
 
   const safeTitle = book.title.replace(/[/\\:*?"<>|]/g, '_').slice(0, 80)
-  const pdfPath = join(outDir, `${safeTitle}.pdf`)
-  onProgress(`排版 PDF → ${pdfPath}`)
-  await renderPdf(ctx, meta, pdfPath)
+  let pdfPath: string | null = null
+  if (wantPdf) {
+    pdfPath = join(outDir, `${safeTitle}.pdf`)
+    onProgress(`排版 PDF → ${pdfPath}`)
+    await renderPdf(ctx, meta, pdfPath)
+  }
 
   return {
     pdfPath,
