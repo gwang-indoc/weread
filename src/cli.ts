@@ -9,7 +9,7 @@ import { createRequire } from 'node:module'
 import { spawn } from 'node:child_process'
 import { statSync } from 'node:fs'
 import { Command } from 'commander'
-import { checkbox, Separator } from '@inquirer/prompts'
+import { checkbox, confirm, Separator } from '@inquirer/prompts'
 import { login, openAuthenticated, SessionExpiredError, SESSION_PATH, hasSession } from './session.ts'
 import { listBooks, resolveBook } from './bookshelf.ts'
 import { exportBook } from './export.ts'
@@ -135,7 +135,8 @@ program
 program
   .argument('[books...]', '书名（可传多个）；不传则进入交互选择')
   .option('-o, --out <dir>', '输出目录', 'out')
-  .option('-f, --force', '忽略缓存，重新抓取', false)
+  .option('-f, --force', '忽略缓存，重新抓取（会先删掉已有缓存，需确认）', false)
+  .option('--yes', '不询问，直接确认 --force 的删除', false)
   .option('--headed', '显示浏览器窗口', false)
   .option('--scale <n>', '抓取分辨率倍数（越大越清晰、文件越大）', '2')
   .option('--format <fmt>', '输出格式：epub、pdf 或 both', 'epub')
@@ -165,6 +166,8 @@ program
           console.log('  没有选择任何书')
           return
         }
+
+        if (opts.force && !(await confirmForce(chosen, opts.yes))) return
 
         let failed = false
 
@@ -217,6 +220,7 @@ program
 interface Options {
   out: string
   force: boolean
+  yes: boolean
   headed: boolean
   scale: string
   format: string
@@ -229,6 +233,59 @@ function describeOutcome(outcome: string): string {
   if (outcome === 'unauthorized') return '未授权：试读已结束或未购买，后续内容无法导出'
   if (outcome === 'interrupted') return '抓取中断，未翻到最后一页'
   return '抓取失败'
+}
+
+/**
+ * Confirm the deletion `--force` performs before any of it happens.
+ *
+ * `--force` is `clearBook()`, an `rm -rf` on the book's cache directory. What
+ * makes it worth a prompt rather than a line of help text is the asymmetry of
+ * the mistake: capture is deliberately serial with 1–3 s pauses, so a finished
+ * book is hours of walking that cannot be re-fetched any faster, while the flag
+ * that discards it is one character long and sits next to `-o`.
+ *
+ * Every book is listed and confirmed once, up front, rather than each being
+ * asked about as its turn comes — a multi-book run should not stop for a
+ * question twenty minutes in, when the answer is no and everything since the
+ * first book was wasted.
+ *
+ * Note this is the *capture* --force. The one on `epub` discards ocr.json,
+ * which is minutes of recognition over a cache that stays put, and is not worth
+ * interrupting anyone over.
+ */
+async function confirmForce(books: Book[], assumeYes: boolean): Promise<boolean> {
+  const atRisk = (
+    await Promise.all(books.map(async (b) => ({ book: b, pages: await cacheSize(b.id) })))
+  ).filter((b) => b.pages > 0)
+
+  // On an empty cache --force deletes nothing, so it earns no ceremony. This is
+  // the common case for a first run and must stay silent.
+  if (!atRisk.length) return true
+
+  console.log('\n  --force 会先删掉这些书已有的缓存，从头重新抓取：')
+  for (const { book, pages } of atRisk) {
+    console.log(`    ${book.title} — 已缓存 ${pages} 页`)
+    console.log(`      ${bookDir(book.id)}`)
+  }
+  console.log('    抓取是串行的、每屏 1–3 秒，删掉的部分只能照原速再走一遍。')
+
+  if (assumeYes) {
+    console.log('  --yes：已确认\n')
+    return true
+  }
+
+  // A pipe, a cron job or CI has nobody to answer, and prompting there would
+  // hang forever. Proceeding unasked is the exact failure this guard exists to
+  // prevent, so the answer is no — and it names the flag that means yes.
+  if (!process.stdin.isTTY) {
+    console.error('\n  没有终端可以确认（stdin 不是 TTY）。确定要删，请加 --yes。')
+    process.exitCode = 1
+    return false
+  }
+
+  const ok = await confirm({ message: '删掉上面的缓存，重新抓取？', default: false })
+  if (!ok) console.log('  已取消，缓存没有改动')
+  return ok
 }
 
 async function pick(books: Book[]): Promise<Book[]> {
