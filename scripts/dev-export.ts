@@ -2,7 +2,7 @@
  * End-to-end check: page through the start of a book and typeset a PDF.
  *
  * Usage: node scripts/dev-export.ts "牛顿传" 8
- *        (book query, max screens)
+ *        (book query, max screens — defaults to 2)
  */
 import { openAuthenticated } from '../src/session.ts'
 import { listBooks, resolveBook } from '../src/bookshelf.ts'
@@ -10,7 +10,7 @@ import { exportBook } from '../src/export.ts'
 import { cacheSize, bookDir, readMeta } from '../src/cache.ts'
 
 const query = process.argv[2] ?? ''
-const maxScreens = Number(process.argv[3] ?? '8')
+const maxScreens = Number(process.argv[3] ?? '2')
 
 async function main() {
   const { browser, ctx } = await openAuthenticated({ headed: true })
