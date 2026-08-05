@@ -278,6 +278,34 @@ export interface BookWalkResult {
 }
 
 /**
+ * Did the walk stop because 下一页 stopped taking it anywhere?
+ *
+ * Three different `stoppedBecause` reasons mean this, and *all three* are also
+ * how the last page of a book presents itself:
+ *
+ * - `end of book (screen repeated)` — the click lands, the same pixels come back
+ * - `下一页 not clickable` — the control is there but refuses the click
+ * - `no 下一页 control` — it is not in the DOM at all
+ *
+ * Only the 目录 can tell the end of a book from a stalled reader (see
+ * `looksTruncated`), so the three are grouped here rather than being handled one
+ * at a time. They are grouped in this file because this is where the strings are
+ * produced; matching them from elsewhere is how the second and third came to be
+ * treated as failures for as long as they were.
+ *
+ * `no canvas columns rendered` is deliberately *not* one of them: that is the
+ * reader failing to paint after six attempts, which says nothing about whether
+ * pages remain.
+ */
+export function pageTurnExhausted(stoppedBecause: string): boolean {
+  return (
+    stoppedBecause.startsWith('end of book') ||
+    stoppedBecause === '下一页 not clickable' ||
+    stoppedBecause === 'no 下一页 control'
+  )
+}
+
+/**
  * Walk the whole book forward from the current position, capturing every screen.
  *
  * There is deliberately no chapter boundary here. 节 can start partway down a

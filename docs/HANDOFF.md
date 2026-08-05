@@ -69,16 +69,35 @@ All of these are already handled in the code — this list exists so you don't
   headed by the previous one. ADR 0002 — three fixes failed before the linear
   walk.
 - **"The book ended" and "the page turn failed" are the same observation.** Both
-  are: 下一页 was clicked and the same pixels came back. `walkBook` reports both as
-  `end of book (screen repeated)`, so taking that at face value records a stalled
-  reader as a *complete* export — and the auto-resume, which waits for
-  `interrupted`, would never fire. `looksTruncated()` breaks the tie on 目录
-  position, since we already know how long the book is. Its tolerance is capped as
-  a fraction of the 目录 as well as absolutely: three entries is under 4% of a
-  196-entry book but half of a six-entry one, and being generous is what passes a
-  truncated book off as finished. A header *absent* from the 目录 deliberately
-  reads as the end, because `resumeIndex` collapses an unknown header to 0, which
-  would otherwise look like "still at the beginning" and retry forever.
+  are: 下一页 stopped advancing. Taking that at face value records a stalled reader
+  as a *complete* export — and the auto-resume, which waits for `interrupted`,
+  would never fire. `looksTruncated()` breaks the tie on 目录 position, since we
+  already know how long the book is. Its tolerance is capped as a fraction of the
+  目录 as well as absolutely: three entries is under 4% of a 196-entry book but half
+  of a six-entry one, and being generous is what passes a truncated book off as
+  finished. A header *absent* from the 目录 deliberately reads as the end, because
+  an unknown header collapses to "still at the beginning" and would retry forever.
+- **A page turn dies in three ways, and all three are also how a book ends.**
+  `end of book (screen repeated)`, `下一页 not clickable` and `no 下一页 control`.
+  Only the first was arbitrated by the 目录 until ADR 0004; the other two were
+  treated as failures, so an 860-screen book that finished on its last 目录 entry
+  was recorded as `interrupted`, rested twice for five minutes, and shipped an
+  EPUB carrying a false 未翻到最后一页 notice. Use `pageTurnExhausted()`; do not
+  match those strings anywhere else.
+- **A 目录 title is not a unique key, so "where are we" needs the whole trail.**
+  《于是一片光明》 lists each chapter title twice — prose, then again under 参考文献 —
+  so `findIndex` on the last header put a walk one entry from the end back at
+  `#8` of 17. `reachedIndex()` walks the trail forward instead. Two things there
+  look wrong and are not: a header matching an entry *just behind* the position is
+  ignored (that is the lag, and scanning forward past it takes the duplicate and
+  jumps into the back matter), and the position never moves backwards. ADR 0004.
+- **Reaching the last 目录 entry once is not the same as being there.** That book
+  shows a 致谢 header at screen 645 as well as at 859, its real position — a 目录
+  is not always in physical order — so a forward-only position latches 200 screens
+  early. `looksTruncated` additionally requires the *last* header to resolve at or
+  after the reached entry. The residual limit is real and unfixable from this
+  signal: the final three entries of that book cover its last ~200 screens, so a
+  stall inside the references still reads as complete.
 - **The 目录 panel's backdrop is a full-viewport `.wr_mask` with
   `pointer-events:auto`.** Leaving the panel open makes every later click time
   out. `closeToc()` exists for this; call it after navigating.
@@ -174,13 +193,14 @@ at full scale: total wall-clock, cache size, the 400-screens-per-walk guard, and
 the 未授权 (trial-expired) code path, which has never once triggered against a
 real book.
 
-**The auto-resume loop has not run live either.** Its decision table was checked
-by simulation against the real `looksTruncated`/`restSchedule` helpers — stall
-mid-book retries and eventually completes, a genuine end completes on the first
-pass without burning a wait, no-progress stops after two futile attempts,
-`--max-screens` never retries — but no actual stalled reader has been observed
+**The auto-resume loop has now run live, and got the verdict wrong.** An
+860-screen walk of 《于是一片光明》 finished on its last 目录 entry, called it
+`interrupted`, and rested twice before giving up — the two bugs in ADR 0004. The
+arbitration is fixed and replayed against that real cache, which now reads
+`complete`; the *resting* half is still unproven, because both those retries were
+at a book that had already ended. No actual stalled reader has been observed
 recovering after a reload. That reload is the assumed fix; if resuming turns out
-not to help, that assumption is the thing to question first.
+not to help, that assumption is still the thing to question first.
 
 The local cache currently holds three books: two v2 (17 and 298 screens, both
 `interrupted`) and one **v1 legacy** that `readMeta` deliberately refuses to

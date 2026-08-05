@@ -22,6 +22,9 @@ The short version of the ADRs, so you know whether you need them:
   capture is one linear pass over screens. Three per-chapter designs failed first.
 - **0003** — EPUB comes from OCR over the cache, in overlapping bands, because
   Vision silently returns *nothing* for large clear text next to dense small text.
+- **0004** — whether a walk finished is decided from the whole trail of running
+  headers, not the last one, because 目录 titles repeat and a page turn dies in
+  three different ways. Read it before touching `looksTruncated`/`reachedIndex`.
 
 ## Naming
 

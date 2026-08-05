@@ -16,12 +16,20 @@ import { join } from 'node:path'
 import type { BrowserContext, Page } from 'playwright-core'
 import type { Book, Chapter } from './types.ts'
 import { readToc, gotoChapter, closeToc } from './bookshelf.ts'
-import { walkBook, ensureLightTheme, restoreDarkTheme, waitForColumns, readHeader } from './capture.ts'
+import {
+  walkBook,
+  ensureLightTheme,
+  restoreDarkTheme,
+  waitForColumns,
+  readHeader,
+  pageTurnExhausted,
+} from './capture.ts'
 import {
   initMeta,
   appendScreen,
   knownHashes,
   lastHeader,
+  headerTrail,
   writeMeta,
   clearBook,
   type BookMeta,
@@ -122,16 +130,73 @@ export function sameTitle(a: string | null | undefined, b: string | null | undef
 }
 
 /**
+ * How far behind the current position a lagging header may still be naming.
+ *
+ * The lag is up to a page (ADR 0002), which spans at most a 节 or two of the 目录.
+ * It has to stay small: the wider this window, the more a genuine arrival at a
+ * repeated title reads as a lag and is ignored — which is the original bug, just
+ * reached from the other side.
+ */
+const HEADER_LAG_ENTRIES = 2
+
+/**
+ * The furthest 目录 position the walk can be shown to have reached.
+ *
+ * Takes the whole trail of headers rather than just the last one, because a title
+ * is not a unique key: a 目录 may list the same title twice. 《于是一片光明》 lists
+ * its five chapter titles once for the prose and again under 参考文献, so
+ * `第五章 新世纪` appears at both #8 and #15 of 17. Matching the last header alone
+ * takes the *first* occurrence, which put a walk that had reached the references
+ * back at #8 — reading as "less than half way" when it was one entry from the end.
+ *
+ * The trail resolves it because a walk is linear (ADR 0002): each header can only
+ * be at or after where the previous one put us, so the same title later in the
+ * book can only be the later occurrence. Matching forward-only also means a title
+ * found solely *behind* the current position is no evidence of progress and never
+ * moves the position backwards — headers lag the display by up to a page, so a
+ * brief apparent rewind is normal and must not read as one.
+ *
+ * Returns -1 when no header matched any entry at all.
+ */
+export function reachedIndex(chapters: Chapter[], headers: readonly (string | null | undefined)[]): number {
+  let at = -1
+  for (const header of headers) {
+    if (!header) continue
+
+    // A header naming an entry just behind the current position is the lag, not a
+    // rewind and not progress, so it is skipped rather than matched.
+    //
+    // This is not a nicety: scanning forward from `at` unconditionally is wrong in
+    // exactly the case the trail exists to fix. A header repeating while the walk
+    // sat still — 第一章, 第二章, 第一章, 第二章 across four screens, which is what a
+    // lag looks like — finds no 第一章 ahead of #5, takes the *duplicate* at #11,
+    // and lands the walk in the 参考文献 section it never reached. A test asserting
+    // the position must not move backwards is what caught it.
+    let lagging = false
+    for (let i = Math.max(0, at - HEADER_LAG_ENTRIES); i <= at; i++) {
+      if (sameTitle(chapters[i]?.title, header)) {
+        lagging = true
+        break
+      }
+    }
+    if (lagging) continue
+
+    const found = chapters.findIndex((c, i) => i > at && sameTitle(c.title, header))
+    if (found >= 0) at = found
+  }
+  return at
+}
+
+/**
  * Pick where to start paging.
  *
- * A fresh run starts at the first 目录 entry. A resumed run aims at the entry
- * matching the last captured header, so it re-pages only a little before
- * reaching new ground — hash-based caching makes that overlap harmless.
+ * A fresh run starts at the first 目录 entry. A resumed run aims at the entry the
+ * trail of headers reached, so it re-pages only a little before reaching new
+ * ground — hash-based caching makes that overlap harmless.
  */
-export function resumeIndex(chapters: Chapter[], header: string | null): number {
-  if (!header) return 0
-  const found = chapters.findIndex((c) => sameTitle(c.title, header))
-  return found >= 0 ? found : 0
+export function resumeIndex(chapters: Chapter[], headers: readonly (string | null | undefined)[]): number {
+  const at = reachedIndex(chapters, headers)
+  return at >= 0 ? at : 0
 }
 
 /**
@@ -154,24 +219,48 @@ function endTolerance(entries: number): number {
  * Did the walk stop short of the end of the book?
  *
  * This exists because "the end of the book" and "the page turn silently failed"
- * produce the *same* observation: 下一页 stops advancing and the same pixels come
- * back. `walkBook` reports both as `end of book (screen repeated)`, so taking that
- * at face value records a stalled reader as a complete export — and a retry that
- * waits for `interrupted` would then never fire.
+ * produce the *same* observation: 下一页 stops advancing. `pageTurnExhausted`
+ * lists the three ways that presents, and none of them distinguishes the two, so
+ * taking any of them at face value records a stalled reader as a complete export
+ * — and a retry that waits for `interrupted` would then never fire.
  *
- * The 目录 breaks the tie, because we already know how long the book is. A repeat
- * while the last header seen is still far from the final entry is a stall.
+ * The 目录 breaks the tie, because we already know how long the book is. A dead
+ * page turn while the trail of headers is still far from the final entry is a
+ * stall.
  *
- * A header that is *not* in the 目录 returns false — treated as the end. Headers
+ * No header matching the 目录 at all returns false — treated as the end. Headers
  * lag and do not always correspond to an entry (ADR 0002), and `resumeIndex`
- * collapses an unknown header to 0, which would otherwise read as "we are at the
- * very beginning" and retry forever at a genuine end of book.
+ * collapses that case to 0, which would otherwise read as "we are at the very
+ * beginning" and retry forever at a genuine end of book.
  */
-export function looksTruncated(chapters: Chapter[], header: string | null): boolean {
-  if (!chapters.length || !header) return false
-  const found = chapters.findIndex((c) => sameTitle(c.title, header))
-  if (found < 0) return false
-  return found < chapters.length - endTolerance(chapters.length)
+export function looksTruncated(chapters: Chapter[], headers: readonly (string | null | undefined)[]): boolean {
+  if (!chapters.length) return false
+  const at = reachedIndex(chapters, headers)
+  if (at < 0) return false
+  if (at < chapters.length - endTolerance(chapters.length)) return true
+
+  /**
+   * The trail says the end was reached; require that the walk is still *there*.
+   *
+   * `reachedIndex` only ever moves forward, so one stray header latches it for the
+   * rest of the book — and a 目录 is not always in physical order, so strays are
+   * real. 《于是一片光明》 shows a 致谢 header at screen 645 as well as at 859, its
+   * true position: 200 screens of references come after the first one. Taking the
+   * furthest point alone, a reader that stalled anywhere after screen 645 would
+   * have reported a complete book, which is the one failure this project refuses
+   * to allow.
+   *
+   * So the last header has to be consistent with being at the end too — at or
+   * after the reached entry, allowing for the lag. A last header that matches no
+   * 目录 entry at all still reads as the end, for the reason above: headers do not
+   * always correspond to entries, and guessing "truncated" retries forever at a
+   * genuine end of book.
+   */
+  const last = [...headers].reverse().find((h) => !!h)
+  if (!last) return false
+  const matches = chapters.map((c, i) => (sameTitle(c.title, last) ? i : -1)).filter((i) => i >= 0)
+  if (!matches.length) return false
+  return !matches.some((i) => i >= at - HEADER_LAG_ENTRIES)
 }
 
 export async function exportBook(ctx: BrowserContext, book: Book, opts: ExportOptions): Promise<ExportResult> {
@@ -209,7 +298,7 @@ export async function exportBook(ctx: BrowserContext, book: Book, opts: ExportOp
       // A dark reader yields dark pixels, since the prose is painted.
       if (await ensureLightTheme(page)) themeChanged = true
     }
-    const startAt = resumeIndex(chapters, lastHeader(meta))
+    const startAt = resumeIndex(chapters, headerTrail(meta))
     await gotoChapter(page, startAt)
     await closeToc(page)
     await waitForColumns(page)
@@ -257,11 +346,12 @@ export async function exportBook(ctx: BrowserContext, book: Book, opts: ExportOp
       const gained = meta.screens.length - before
       onProgress(`共翻 ${result.screensSeen} 屏，新增 ${gained} 屏（${result.stoppedBecause}）`)
 
-      // A repeated screen means 下一页 stopped advancing — which is how both the
-      // end of the book and a stalled reader present. The 目录 tells them apart.
-      const repeated = result.stoppedBecause.startsWith('end of book')
-      const truncated = looksTruncated(chapters, lastHeader(meta))
-      if (repeated && !truncated) {
+      // 下一页 stopped advancing — which is how both the end of the book and a
+      // stalled reader present, in any of three ways (`pageTurnExhausted`). The
+      // 目录 tells them apart; the stop reason alone cannot.
+      const exhausted = pageTurnExhausted(result.stoppedBecause)
+      const truncated = looksTruncated(chapters, headerTrail(meta))
+      if (exhausted && !truncated) {
         outcome = 'complete'
         note = undefined
       } else if (result.stoppedBecause.startsWith('hit maxScreens')) {
@@ -270,7 +360,13 @@ export async function exportBook(ctx: BrowserContext, book: Book, opts: ExportOp
       } else {
         const paywall = await detectAccessProblem(page)
         outcome = paywall ? 'unauthorized' : 'interrupted'
-        note = paywall ?? (repeated ? `翻页停在《${lastHeader(meta) ?? '?'}》，目录还没走完` : result.stoppedBecause)
+        // Keep the mechanism as well as the diagnosis: which of the three ways the
+        // page turn died is the first thing wanted when a stall is investigated.
+        note =
+          paywall ??
+          (exhausted
+            ? `翻页停在《${lastHeader(meta) ?? '?'}》，目录还没走完（${result.stoppedBecause}）`
+            : result.stoppedBecause)
       }
       meta.outcome = outcome
       meta.note = note

@@ -36,8 +36,15 @@ import {
   collectQa,
 } from '../src/epub.ts'
 import { crc32, zip } from '../src/zip.ts'
-import { sameTitle, resumeIndex, scaleChangeWarning, looksTruncated, restSchedule } from '../src/export.ts'
-import { chapterKeyOf } from '../src/capture.ts'
+import {
+  sameTitle,
+  resumeIndex,
+  reachedIndex,
+  scaleChangeWarning,
+  looksTruncated,
+  restSchedule,
+} from '../src/export.ts'
+import { chapterKeyOf, pageTurnExhausted } from '../src/capture.ts'
 import { screenFileName, orderedPages, knownHashes, lastHeader, CACHE_VERSION, type BookMeta } from '../src/cache.ts'
 import { buildHtml } from '../src/render.ts'
 import { unitsOf, coverageOf, buildStatusHtml, type StatusView, type BookStatus } from '../src/status.ts'
@@ -96,10 +103,11 @@ test('chapterKeyOf reads the unit key when the URL carries one', () => {
 })
 
 test('resumeIndex aims a resumed walk at the last header seen', () => {
-  assert.equal(resumeIndex(chapters, '牛顿的家族'), 3)
-  assert.equal(resumeIndex(chapters, '第一章 离弃'), 2)
-  assert.equal(resumeIndex(chapters, null), 0, 'a fresh run starts at the beginning')
-  assert.equal(resumeIndex(chapters, '这本书里没有的标题'), 0, 'an unknown header restarts from the beginning')
+  assert.equal(resumeIndex(chapters, ['牛顿的家族']), 3)
+  assert.equal(resumeIndex(chapters, ['第一章 离弃']), 2)
+  assert.equal(resumeIndex(chapters, []), 0, 'a fresh run starts at the beginning')
+  assert.equal(resumeIndex(chapters, [null]), 0, 'a screen with no header is no evidence')
+  assert.equal(resumeIndex(chapters, ['这本书里没有的标题']), 0, 'an unknown header restarts from the beginning')
 })
 
 test('looksTruncated tells a stalled reader from the end of the book', () => {
@@ -115,10 +123,10 @@ test('looksTruncated tells a stalled reader from the end of the book', () => {
     { index: 5, level: 1, title: '版权信息' },
   ]
   // 6 entries -> tolerance 1, so only the final entry reads as the end.
-  assert.equal(looksTruncated(toc, '第一章'), true, 'stopped at entry 0 of 6 — a stall')
-  assert.equal(looksTruncated(toc, '第二节'), true)
-  assert.equal(looksTruncated(toc, '附录'), true)
-  assert.equal(looksTruncated(toc, '版权信息'), false, 'the last entry — genuinely the end')
+  assert.equal(looksTruncated(toc, ['第一章']), true, 'stopped at entry 0 of 6 — a stall')
+  assert.equal(looksTruncated(toc, ['第一章', '第一节', '第二节']), true)
+  assert.equal(looksTruncated(toc, ['第一章', '第二章', '附录']), true)
+  assert.equal(looksTruncated(toc, ['附录', '版权信息']), false, 'the last entry — genuinely the end')
 })
 
 test('the end-of-book tolerance scales with the length of the 目录', () => {
@@ -130,24 +138,116 @@ test('the end-of-book tolerance scales with the length of the 目录', () => {
     Array.from({ length: n }, (_, i) => ({ index: i, level: 1, title: `第${i}章` }))
 
   // 200 entries -> tolerance 3: stopping 4 from the end is still a stall.
-  assert.equal(looksTruncated(toc(200), '第196章'), true)
-  assert.equal(looksTruncated(toc(200), '第197章'), false)
+  assert.equal(looksTruncated(toc(200), ['第196章']), true)
+  assert.equal(looksTruncated(toc(200), ['第197章']), false)
 
   // 8 entries -> tolerance 2.
-  assert.equal(looksTruncated(toc(8), '第5章'), true)
-  assert.equal(looksTruncated(toc(8), '第6章'), false)
+  assert.equal(looksTruncated(toc(8), ['第5章']), true)
+  assert.equal(looksTruncated(toc(8), ['第6章']), false)
 
   // A 3-entry book must still be completable — tolerance floors at 1.
-  assert.equal(looksTruncated(toc(3), '第2章'), false)
-  assert.equal(looksTruncated(toc(3), '第1章'), true)
+  assert.equal(looksTruncated(toc(3), ['第2章']), false)
+  assert.equal(looksTruncated(toc(3), ['第1章']), true)
 })
 
 test('looksTruncated treats an unrecognised header as the end, not as a stall', () => {
   // Headers lag and do not always match an entry (ADR 0002). Guessing "truncated"
   // here would retry forever at a real end of book, five minutes at a time.
-  assert.equal(looksTruncated(chapters, '这本书里没有的标题'), false)
-  assert.equal(looksTruncated(chapters, null), false)
-  assert.equal(looksTruncated([], '第一章 离弃'), false)
+  assert.equal(looksTruncated(chapters, ['这本书里没有的标题']), false)
+  assert.equal(looksTruncated(chapters, [null]), false)
+  assert.equal(looksTruncated(chapters, []), false)
+  assert.equal(looksTruncated([], ['第一章 离弃']), false)
+})
+
+/**
+ * 《于是一片光明》 as captured: 17 entries, each of the five chapter titles listed
+ * twice — once for the prose, once under 参考文献. Taken from the real 目录.
+ */
+const duplicateToc: Chapter[] = [
+  '扉页',
+  '版权信息',
+  '作者简介',
+  '前言',
+  '第一章 天球运行',
+  '第二章 要有光',
+  '第三章 革命',
+  '第四章 激变',
+  '第五章 新世纪',
+  '参考文献',
+  '总体参考',
+  '第一章 天球运行',
+  '第二章 要有光',
+  '第三章 革命',
+  '第四章 激变',
+  '第五章 新世纪',
+  '致谢',
+].map((title, index) => ({ index, level: 1, title }))
+
+test('reachedIndex resolves a repeated 目录 title by where the walk already was', () => {
+  // 第五章 新世纪 is #8 and #15. A lone header cannot say which, and findIndex
+  // answered #8 — putting a walk one entry from the end at "less than half way".
+  // The trail decides it: the walk passed 参考文献 (#9) and 总体参考 (#10), so the
+  // later occurrence is the only one it can be.
+  const backMatter = ['第五章 新世纪', '参考文献', '总体参考', '第一章 天球运行', '第五章 新世纪']
+  assert.equal(reachedIndex(duplicateToc, backMatter), 15)
+
+  // The same title before any of that is still the prose chapter.
+  assert.equal(reachedIndex(duplicateToc, ['前言', '第一章 天球运行', '第五章 新世纪']), 8)
+
+  assert.equal(reachedIndex(duplicateToc, ['致谢']), 16, 'a unique title needs no trail')
+  assert.equal(reachedIndex(duplicateToc, []), -1, 'nothing seen yet')
+  assert.equal(reachedIndex(duplicateToc, ['没有这一条']), -1, 'no entry matched')
+})
+
+test('reachedIndex never moves backwards, because headers lag the display', () => {
+  // A header trails the page by up to a page (ADR 0002), so the same title
+  // reappearing after the walk has moved on is normal and is not a rewind. If it
+  // moved the position back, a book at its end would read as truncated and rest
+  // for five minutes at a time until --max-attempts ran out.
+  const trail = ['第一章 天球运行', '第二章 要有光', '第一章 天球运行', '第二章 要有光']
+  assert.equal(reachedIndex(duplicateToc, trail), 5)
+  assert.equal(reachedIndex(duplicateToc, ['致谢', '第一章 天球运行']), 16)
+})
+
+test('a book that reached its last 目录 entry is complete, not truncated', () => {
+  // 《于是一片光明》: 860 screens, the walk ended on 致谢 (#16 of 17), and the stop
+  // reason was 下一页 not clickable. Reported as interrupted — two five-minute
+  // rests and a false 未翻到最后一页 notice in the EPUB — because only
+  // `end of book (screen repeated)` was treated as a possible end.
+  const trail = ['第五章 新世纪', '参考文献', '总体参考', '第五章 新世纪', '致谢']
+  assert.equal(looksTruncated(duplicateToc, trail), false)
+  assert.equal(pageTurnExhausted('下一页 not clickable'), true)
+
+  // The same stop reason mid-book is still a stall.
+  assert.equal(looksTruncated(duplicateToc, ['前言', '第二章 要有光']), true)
+})
+
+test('reaching the end once is not enough — the walk has to still be there', () => {
+  // 《于是一片光明》 shows a 致谢 header at screen 645 as well as at its real position,
+  // screen 859, with 200 screens of references in between: a 目录 is not always in
+  // physical order. reachedIndex only moves forward, so that stray latches it at
+  // the final entry for the rest of the book. Without a second condition, a reader
+  // stalling anywhere after screen 645 would report a complete book.
+  const strayThenStall = ['第四章 激变', '致谢', '第五章 新世纪', '参考文献', '第二章 要有光']
+  assert.equal(reachedIndex(duplicateToc, strayThenStall), 16, 'latched by the stray')
+  assert.equal(looksTruncated(duplicateToc, strayThenStall), true, 'but it is plainly not at the end')
+
+  // The same stray followed by an actual arrival is complete.
+  assert.equal(looksTruncated(duplicateToc, ['第四章 激变', '致谢', '第五章 新世纪', '致谢']), false)
+
+  // A last header absent from the 目录 still reads as the end: headers do not
+  // always correspond to entries, and guessing "truncated" retries forever there.
+  assert.equal(looksTruncated(duplicateToc, ['致谢', '这条不在目录里']), false)
+})
+
+test('every way the page turn dies is a candidate end of book, except a dead reader', () => {
+  assert.equal(pageTurnExhausted('end of book (screen repeated)'), true)
+  assert.equal(pageTurnExhausted('下一页 not clickable'), true)
+  assert.equal(pageTurnExhausted('no 下一页 control'), true)
+  // Six failed paints say nothing about whether pages remain, so this one must
+  // never be arbitrated by the 目录 — it is a failure however near the end it is.
+  assert.equal(pageTurnExhausted('no canvas columns rendered'), false)
+  assert.equal(pageTurnExhausted('hit maxScreens=8'), false)
 })
 
 test('restSchedule splits the rest into chunks that sum to exactly the wait', () => {

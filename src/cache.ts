@@ -103,9 +103,20 @@ export function knownHashes(meta: BookMeta): Set<string> {
   return out
 }
 
-/** The header of the last captured screen — where a resumed walk should aim. */
+/** The header of the last captured screen — what the walk got to, for reporting. */
 export function lastHeader(meta: BookMeta): string | null {
   return meta.screens.length ? meta.screens[meta.screens.length - 1].header : null
+}
+
+/**
+ * Every running header the walk has seen, in capture order.
+ *
+ * Where the walk has got to is a question about this whole trail, not about its
+ * last entry: 目录 titles are not unique, so one header on its own can name two
+ * different positions in the book. See `reachedIndex`.
+ */
+export function headerTrail(meta: BookMeta): (string | null)[] {
+  return meta.screens.map((s) => s.header)
 }
 
 /**
