@@ -33,7 +33,9 @@ git pull && pnpm install && pnpm build
 > allow-scripts 机制会拦下 `prepare` 并只打一行警告，`dist/` 就不会生成、命令随即报错。
 > 所以显式跑一次 build 最省心，无论用哪个包管理器都不会错。
 
-不想装全局命令的话，在仓库里直接跑源码也一样（Node 会自己剥离类型）：
+不想装全局命令的话，在仓库里直接跑源码也一样（Node 会自己剥离类型）。这条路要
+**Node 22.18 以上**：类型剥离从那一版起才默认打开，22.17 会直接报
+`ERR_UNKNOWN_FILE_EXTENSION`。装好的 `dist/` 没有这个限制。
 
 ```bash
 node src/cli.ts list
@@ -217,7 +219,8 @@ Ctrl-C 也不会丢，重跑同一命令一样会续上。
 npx playwright install chromium
 ```
 
-Node 需要 20.11 以上。
+Node 需要 20.12 以上（`@inquirer/core` 用到 `node:util` 的 `styleText`，20.11 起不来）。
+想直接跑仓库里的源码则需要 22.18 以上，见上。
 
 ## 它是怎么工作的
 
@@ -255,12 +258,15 @@ Node 需要 20.11 以上。
 
 ```bash
 pnpm install
-pnpm test          # 离线单元测试，不需要登录
-pnpm typecheck
+pnpm verify        # 类型检查 + 单元测试 + 端到端测试，都不需要登录
 pnpm build         # 编译到 dist/，npm 包发布的就是这个
-node src/cli.ts list                      # 直接跑源码（Node 会剥离类型）
+node src/cli.ts list                      # 直接跑源码（需要 Node 22.18+）
 node scripts/dev-export.ts "书名" 8        # 只翻 8 屏，端到端验证
 ```
+
+`pnpm verify` 是 CI 跑的那一套：`pnpm test` 是纯函数的单元测试，`pnpm test:e2e`
+会先编译，再拿编译好的 CLI 在一个临时 `HOME` 下跑 `epub` 和 `status`，用的是脚本
+生成的假书 —— 不联网、不登录、不开浏览器，也不需要 macOS 的 Vision。
 
 `dist/` 不进仓库，由 `prepare` 脚本在安装时编译。全局命令是指向本目录的符号链接，所以
 `git pull && pnpm build` 之后立刻生效。

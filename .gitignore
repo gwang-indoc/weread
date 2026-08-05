@@ -6,5 +6,8 @@ out/
 *.epub
 .DS_Store
 *.tgz
-.claude/
+# Local Claude Code state stays out, but repo-specific skills are part of the
+# project and belong in review like any other instruction to a contributor.
+.claude/*
+!.claude/skills/
 .idea/

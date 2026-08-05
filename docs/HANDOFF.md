@@ -1,7 +1,8 @@
 # Handoff — weread-export
 
 For someone picking this up cold. Written **2026-07-27**, revised **2026-08-03**
-for the EPUB work, against `main` @ `edcdd73` (68 tests passing, typecheck clean).
+for the EPUB work, against `main` @ `edcdd73` (77 unit tests and 24 end-to-end
+tests passing, typecheck clean).
 The EPUB work itself — `src/ocr.ts`, `src/text.ts`, `src/epub.ts`, `src/zip.ts`,
 ADR 0003 — **is uncommitted in the working tree** as of this revision.
 
@@ -244,20 +245,35 @@ read — it needs `--force` to re-capture. That is expected, not a bug.
 ## Verifying a change
 
 ```bash
-pnpm test                          # 68 offline tests, no login needed
-pnpm typecheck
+pnpm verify                        # typecheck + 77 unit + 24 e2e. No login needed
 node scripts/dev-export.ts "书名" 8 # live: capture 8 screens end-to-end, headed
 weread-export status --open        # eyeball what landed
 weread-export epub "书名"           # offline: OCR the cache into an EPUB
 ```
 
-Tests cover the pure halves only (unit grouping, resume targeting, cache
+`pnpm test` covers the pure halves (unit grouping, resume targeting, cache
 ordering, HTML and EPUB generation, escaping, and the whole OCR-to-paragraph
-chain against fixtures shaped like real Vision output). Anything touching the
-browser or Vision itself has no automated coverage by design — the live harness
-above is the check. **Render and look at the output**; a class-name collision that
-blanked every KPI number in the dashboard was invisible to tests and obvious in a
-screenshot.
+chain against fixtures shaped like real Vision output).
+
+`pnpm test:e2e` covers the seam those cannot: it builds the CLI and runs `epub`
+and `status` against a generated fixture book under a scratch `HOME`. Added
+2026-08-05. It is offline and platform-independent, which takes some arranging —
+`exportEpub` reaches for Vision unless every column hash is already in `ocr.json`
+*and* no column has a hole in it, so the fixture pre-populates the one and is
+laid out to avoid the other. The generator checks both against the real rules in
+`text.ts` and refuses to write a fixture that does not hold, rather than letting
+the gate quietly turn into a macOS-only test. Read `test/e2e/support/fixture.ts`
+before changing it.
+
+Its assertions were each confirmed to fail by mutating the source: breaking
+`escapeXml` fails three, inverting the stitch condition in `assembleChapters`
+fails the two stitching tests, and dropping an item from the OPF manifest fails
+the manifest test.
+
+Anything touching the browser has no automated coverage by design — the live
+harness above is the check. **Render and look at the output**; a class-name
+collision that blanked every KPI number in the dashboard was invisible to tests
+and obvious in a screenshot.
 
 For an EPUB change, unzip it and read it — the failures that mattered were all
 visible in the prose and invisible to types: paragraphs split mid-sentence, a

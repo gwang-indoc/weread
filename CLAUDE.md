@@ -56,14 +56,34 @@ Match the surrounding style rather than a general default:
 ## Verifying
 
 ```bash
-pnpm test          # 68 offline tests, no login, no browser
-pnpm typecheck
-pnpm build
+pnpm verify        # typecheck + unit + e2e. The gate; run this before you commit
 ```
 
-Browser- and Vision-dependent halves have no automated coverage by design. For
-those, **run it and look at the output** — the failures that mattered in this repo
-were all invisible to types and obvious on inspection:
+This is what CI runs, on Node 22.18 and 24, on both Ubuntu and macOS
+(`.github/workflows/ci.yml`). **The Ubuntu leg is load-bearing**: if a change
+ever makes the EPUB path reach for Vision again, macOS would pass and Ubuntu
+would fail, which is the whole point of it being there.
+
+Or the pieces, when you want a faster loop:
+
+```bash
+pnpm typecheck
+pnpm test          # 77 unit tests over the pure halves. No login, no browser
+pnpm test:e2e      # builds, then drives the built CLI over a synthetic cache
+```
+
+`pnpm test:e2e` runs `epub` and `status` end to end against a generated fixture
+book, with `HOME` pointed at a temp dir — offline, no login, no browser, and no
+Vision. It asserts the things HANDOFF says to check by hand: the archive opens,
+every document is well-formed, the manifest matches what is on disk, paragraphs
+are stitched rather than split, the truncation notice is present and the QA
+section makes no accuracy claim. **`test/e2e/support/fixture.ts` is the file to
+read first** — it explains why the fixture is synthetic, and why every column in
+it is laid out to contain no holes.
+
+The *browser* half still has no automated coverage, by design. For that, **run it
+and look at the output** — the failures that mattered here were invisible to
+types and obvious on inspection:
 
 ```bash
 weread-export status --open           # what the cache actually holds

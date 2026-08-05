@@ -20,7 +20,7 @@
     "weread-export": "dist/cli.js"
   },
   "engines": {
-    "node": ">=20.11"
+    "node": ">=20.12"
   },
   "files": [
     "dist",
@@ -32,10 +32,12 @@
     "build": "rm -rf dist && tsc -p tsconfig.build.json && node scripts/chmod-bin.mjs",
     "prepare": "tsc -p tsconfig.build.json && node scripts/chmod-bin.mjs",
     "start": "node src/cli.ts",
-    "test": "node --test \"test/**/*.test.ts\"",
+    "test": "node --test \"test/*.test.ts\"",
+    "test:e2e": "pnpm run build && node --test \"test/e2e/*.test.ts\"",
     "test:live": "node scripts/dev-export.ts",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "pnpm run typecheck && pnpm run test && pnpm run build"
+    "verify": "pnpm run typecheck && pnpm run test && pnpm run test:e2e",
+    "prepublishOnly": "pnpm run verify"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

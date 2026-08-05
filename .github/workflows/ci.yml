@@ -1,0 +1,105 @@
+# The gate. Everything here runs offline: no WeRead session, no browser, no
+# Vision, no network beyond installing dependencies.
+#
+# That is not a limitation to work around — it is the reason this can run on
+# every push. The halves that need a real account are checked by hand, and
+# CLAUDE.md says how. Nothing in this file should ever be made to log in.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push makes an in-flight run pointless; let it go rather than queue.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: verify (node ${{ matrix.node }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One version's failure is worth seeing alongside the others' results.
+      fail-fast: false
+      matrix:
+        # 22.18 is the floor for running the sources: type stripping is only on
+        # by default from there (22.17 fails with ERR_UNKNOWN_FILE_EXTENSION),
+        # and `pnpm test` runs .ts files directly.
+        node: ['22.18', '24']
+        # macOS is where this tool actually runs, because the EPUB path needs
+        # the Vision framework. Ubuntu is here to keep the offline gate honestly
+        # platform-independent — the fixture is built to avoid every code path
+        # that would reach for Vision, and this is what proves it stayed that way.
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Before setup-node, so that `cache: pnpm` has a pnpm to ask about.
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+
+      # Runs the `prepare` script, which builds dist/. That is wanted: a build
+      # that fails on install should fail here rather than at `npm i -g .`.
+      - run: pnpm install --frozen-lockfile
+
+      # typecheck + 77 unit tests + 24 end-to-end tests over the built CLI.
+      - run: pnpm verify
+
+  # Does the thing we publish run on the oldest Node we claim to support?
+  #
+  # `pnpm test` cannot answer this: it runs the TypeScript sources, which need a
+  # far newer Node than the compiled output in dist/ does. Consumers install
+  # dist/. So this builds on a current Node and then runs the result on the
+  # floor from package.json's `engines`.
+  #
+  # It is not hypothetical. At the time this was written the declared floor was
+  # 20.11, and the built CLI could not start on it: @inquirer/core imports
+  # `styleText` from node:util, which was added in 20.12.
+  engines-floor:
+    name: built CLI on the declared engines floor
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+
+      # Read the floor out of package.json rather than repeating it here, so the
+      # two cannot drift apart.
+      - id: floor
+        run: |
+          floor=$(node -p "require('./package.json').engines.node.replace(/^[^0-9]*/, '')")
+          echo "version=$floor" >> "$GITHUB_OUTPUT"
+          echo "engines.node floor is $floor"
+
+      # Switches the Node on PATH; dist/ stays as the current Node built it.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.floor.outputs.version }}
+
+      - name: the CLI starts
+        run: node dist/cli.js --version
+
+      - name: status runs, which is the one command needing no session
+        run: |
+          scratch=$(mktemp -d)
+          HOME="$scratch" node dist/cli.js status -o "$scratch/status.html"
+          test -s "$scratch/status.html"
