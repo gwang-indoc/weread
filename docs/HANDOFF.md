@@ -1,10 +1,10 @@
 # Handoff — weread-export
 
-For someone picking this up cold. Written **2026-07-27**, revised **2026-08-03**
-for the EPUB work, against `main` @ `edcdd73` (77 unit tests and 24 end-to-end
-tests passing, typecheck clean).
-The EPUB work itself — `src/ocr.ts`, `src/text.ts`, `src/epub.ts`, `src/zip.ts`,
-ADR 0003 — **is uncommitted in the working tree** as of this revision.
+For someone picking this up cold. Written **2026-07-27**, revised **2026-08-08**
+against `main` @ `e01ecfc` (77 unit tests and 24 end-to-end tests passing,
+typecheck clean, CI green). The EPUB work it was previously waiting on is
+committed (`960bd83`). The cache figures below were measured on 2026-08-05 and
+re-checked unchanged on 2026-08-08.
 
 > This is a point-in-time snapshot and will drift. `git log` and the files it
 > points at are the current truth; the parts worth keeping are the traps, the
@@ -179,33 +179,81 @@ Verified working end to end: login and session reuse, shelf listing, nested 目�
 linear capture with hash-deduped resume, A5 PDF with bookmarks and page numbers,
 the `status` report, and the `epub` path (OCR over the cache → reflowable EPUB).
 
-EPUB is verified against both cached books, offline, via the built CLI: 牛顿传
-(36 pages → 9,474 characters, 1 plate, 0.3 MB) and 达·芬奇手记 (598 pages →
-130,366 characters, 202 plates, 25.8 MB). First OCR of the long one takes ~7
-minutes; re-runs are 1–2 seconds because results are cached per column hash in
-`ocr.json`. Output was checked for XML well-formedness, manifest/spine
-completeness, and no dangling image references. **`--format epub` and
-`--format both` on the capture path have not been run live** — they need a
-session, and only the from-cache `epub` command was exercised.
+**Three books have now been captured to the end**, which is the claim this
+section previously denied. All at `--scale 2`:
 
-**The biggest gap: no book has ever been exported completely.** The longest run
-is 298 screens / 358 MB of an 86-entry book, stopped by `--max-screens`. Untested
-at full scale: total wall-clock, cache size, the 400-screens-per-walk guard, and
-the 未授权 (trial-expired) code path, which has never once triggered against a
-real book.
+| Book | 目录 | Screens | Page images | Cache | Outcome |
+|---|---|---|---|---|---|
+| 牛顿传（修订版） | 196 | 474 | 948 | 198 MB | `complete` |
+| 于是一片光明 | 17 | 860 | 1,720 | 388 MB | `complete` |
+| 达·芬奇手记：珍藏版 | 86 | 309 | 618 | 368 MB | `complete` |
 
-**The auto-resume loop has now run live, and got the verdict wrong.** An
+953 MB and 1,643 screens in total. Each satisfies ADR 0004's condition — the last
+running header resolves to the last 目录 entry — so they are complete by this
+project's own definition. Note what that definition cannot see: ADR 0004 records
+that the final three entries of 《于是一片光明》 cover roughly its last 200
+screens, so a stall inside the back matter would still read as complete. The
+`status` unit coverage does not close that gap either, and is not a completeness
+measure: it reports 195/196 for 牛顿传, 77/86 for 达·芬奇手记, and **26/17** for
+《于是一片光明》 — over 100%, because `unitsOf` opens a new unit whenever a header
+recurs after a different one. Don't read a shortfall there as missing content
+without checking.
+
+EPUB re-exported from all three finished caches on 2026-08-05, offline via the
+built CLI:
+
+| Book | Pages | Chapters | Paragraphs | Characters | Plates | Size | Flagged |
+|---|---|---|---|---|---|---|---|
+| 牛顿传 | 948 | 195 | 1,995 | 253,671 | 27 | 2.8 MB | 821 |
+| 达·芬奇手记 | 618 | 77 | 1,636 | 134,362 | 218 | 26.9 MB | 415 |
+| 于是一片光明 | 1,720 | 26 | 4,733 | 524,707 | 64 | 5.4 MB | 1,883 |
+
+"Flagged" is the low-confidence line count in 关于这个文件 — a list of places to
+check, never an error rate. Each file was verified with the checkers in
+`test/e2e/support/archive.ts`: `mimetype` first and stored, every CRC, XML
+structure, manifest matching the archive, no dangling image references. All three
+pass, so the end-to-end gate's assertions hold on real books and not only on its
+own fixture.
+
+**Correction to a number that was in this section: re-runs are not 1–2 seconds.**
+They are 15–23 s per book. Only *recognition* is cached, in `ocr.json`; the
+illustration crops are not, and `cropIllustrations` re-runs Vision over every hole
+on every export. First OCR of a long book is still the ~7-minute step.
+
+Still untested, and each for a different reason:
+
+- **The 未授权 (trial-expired) path has never once triggered** against a real
+  book. It is the only outcome branch with no live evidence at all.
+- **Total wall-clock per book is unrecorded.** `meta.json` stores no timing, so
+  the finished books above cannot answer how long they took.
+- **`--format epub` and `--format both` on the capture path.** The cache holds no
+  evidence either way — the EPUBs above came from the from-cache `epub` command.
+- **The "400-screens-per-walk guard" this section used to list is not on the
+  export path at all.** It is `walkChapter`'s default, and `walkChapter` is
+  exported from `src/capture.ts` and called from nowhere — left over from the
+  per-chapter design ADR 0002 rejected. The linear walk uses `walkBook`, whose
+  `maxScreens` defaults to 3000; an 860-screen book comes nowhere near it.
+
+**The auto-resume loop has run live, and got the verdict wrong once.** An
 860-screen walk of 《于是一片光明》 finished on its last 目录 entry, called it
 `interrupted`, and rested twice before giving up — the two bugs in ADR 0004. The
 arbitration is fixed and replayed against that real cache, which now reads
-`complete`; the *resting* half is still unproven, because both those retries were
-at a book that had already ended. No actual stalled reader has been observed
-recovering after a reload. That reload is the assumed fix; if resuming turns out
-not to help, that assumption is still the thing to question first.
+`complete`. The *resting* half remains unproven, and note that **the cache cannot
+settle it**: `meta.json` records `outcome` and `note` but not attempts, so a book
+reading `complete` says nothing about whether it rested and resumed along the way.
+No stalled reader has been observed recovering after a reload. That reload is the
+assumed fix; if resuming turns out not to help, that assumption is still the first
+thing to question.
 
-The local cache currently holds three books: two v2 (17 and 298 screens, both
-`interrupted`) and one **v1 legacy** that `readMeta` deliberately refuses to
-read — it needs `--force` to re-capture. That is expected, not a bug.
+The cache also holds **我的第一本算法书** — v1 legacy, 59 目录 entries, no
+`version` field, 0 screens recorded and 2 stray PNGs. `readMeta` refuses it by
+design; re-capturing needs `--force` and hours. That is expected, not a bug.
+Alongside the book directories there is a `bin/` directory holding the compiled
+Vision helper; it has no `meta.json`, so `listCachedBooks` and `collectStatus`
+both skip it.
+
+This section is the one that drifts fastest. The `book-export` loop
+(`domains/book-export/README.md`) owns keeping it true.
 
 ## Open decisions — ask the owner, don't just pick
 

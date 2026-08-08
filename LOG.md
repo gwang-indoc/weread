@@ -34,3 +34,10 @@ What: Stood up the knowledge base (in `kb-docs/`, not `docs/`, which is the ADRs
 HANDOFF's "State of the work" stale — three books now read `complete`, not zero.
 Refs: ARCHITECTURE.md (new), LOG.md (new), domains/book-export/README.md (new),
 signals/README.md (new), kb-docs/README.md (new), domains/README.md (new), CLAUDE.md (updated).
+
+## 2026-08-08 · HANDOFF "State of the work" rewritten against the cache · #ops
+What: The section claimed no book had ever been exported completely; three have (1,643 screens,
+953 MB). Rewrote it with measured figures and four further corrections — stale re-run timing,
+a guard that isn't on the export path, unprovable resume behaviour, and a coverage number that
+isn't one.
+Refs: docs/HANDOFF.md (updated), domains/book-export/README.md (updated).

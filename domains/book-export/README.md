@@ -20,19 +20,16 @@ does, knowing the cost. See the constraint note in `domains/README.md`.
 
 ## Current focus
 
-Establishing what is actually true. The first run found that `docs/HANDOFF.md`'s "State of the
-work" is materially stale: it says **"the biggest gap: no book has ever been exported
-completely"**, and in fact three of the four cached books now read `complete`. Before planning
-any new capture, the loop needs the record to match the disk — and needs to know how much to
-trust the word `complete`.
+How much the word `complete` is worth. The record now matches the disk, so the open question is
+whether ADR 0004's condition is a strong enough definition — it is satisfied by all three
+finished books, and it provably cannot see a stall in the last ~200 screens of 《于是一片光明》.
 
 ## Backlog
 
-- [ ] **Correct `HANDOFF.md`'s "State of the work".** It claims no book has ever been exported
-      completely, and describes a cache of "two v2 (17 and 298 screens, both `interrupted`) and
-      one v1 legacy". Reality on 2026-08-05: three v2 books, all `complete`, 1,643 screens and
-      953 MB. HANDOFF says it is a point-in-time snapshot that will drift, so this is expected
-      drift, not a defect — but it is the first thing a newcomer reads.
+- [x] **Correct `HANDOFF.md`'s "State of the work".** Done 2026-08-05. It claimed no book had
+      ever been exported completely and described a cache of two interrupted books plus a legacy
+      one; the section now carries the three finished books, current EPUB figures, and four
+      corrections the rewrite turned up (see this loop's Timeline).
 - [ ] **Decide how much `complete` is worth.** All three finished books satisfy ADR 0004's
       condition — last running header equals the last 目录 entry. ADR 0004 also records a
       residual limit it cannot fix: the final three entries of 于是一片光明 cover roughly its
@@ -51,7 +48,18 @@ trust the word `complete`.
       no genuinely stalled reader has been observed recovering after a reload. That reload is an
       assumption, and it is the first thing to question if resuming turns out not to help.
 - [ ] **`--format epub` and `--format both` on the capture path have never been run live.** Only
-      the from-cache `epub` command has been exercised.
+      the from-cache `epub` command has been exercised, and the cache holds no evidence either way.
+- [ ] **`walkChapter` is dead code.** Exported from `src/capture.ts`, called from nowhere — the
+      per-chapter walker ADR 0002 rejected, and the home of the "400-screens-per-walk guard"
+      HANDOFF used to list as untested. Decide whether it stays as an artifact of the rejected
+      design or goes; if it stays, it wants a comment saying so.
+- [ ] **Cache the illustration crops.** `cropIllustrations` re-runs Vision over every hole on
+      every export, which is why a re-run is 15–23 s rather than the 1–2 s recognition caching
+      alone would give. `ocr.json` already solves this for recognition; crops land in
+      `<bookDir>/crops/` and are simply not consulted.
+- [ ] **Record wall-clock per capture.** `meta.json` stores no timing and no attempt count, so
+      finished books cannot answer how long they took, or whether they rested on the way. That
+      missing field is also what makes the auto-resume "resting" half unprovable from the cache.
 
 ## Evidence & analysis
 
@@ -73,3 +81,13 @@ screens, 3,288 page images, 953 MB. Three read `complete` (牛顿传 474 screens
 last 目录 entry; 我的第一本算法书 is the v1 legacy. Finding: HANDOFF's "State of the work" is
 stale — it still says no book has ever been exported completely. No capture was started, so no
 reading progress was advanced.
+
+2026-08-05 | run 2 (offline) — rewrote HANDOFF's "State of the work" against measured reality.
+Re-exported all three finished books to EPUB from cache (牛顿传 253,671 chars / 27 plates,
+达·芬奇手记 134,362 / 218, 于是一片光明 524,707 / 64) and verified each archive with
+`test/e2e/support/archive.ts` — mimetype, CRCs, XML, manifest, image refs all clean, so the
+gate's assertions hold on real books too. Four further corrections found: re-runs are 15–23 s,
+not 1–2 s, because crops are re-cut by Vision every time; the "400-screens-per-walk guard" the
+section listed belongs to `walkChapter`, which nothing calls; `meta.json` records no timing or
+attempt count, so the resting half is unprovable from the cache; and `status` unit coverage is
+not a completeness measure (26/17 on one book). Still no capture run, no progress advanced.
